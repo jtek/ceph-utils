@@ -34,13 +34,17 @@ Scrub scheduler
 This script is used to avoid scrub or deep-scrub storms. It's setup to run a
 deep-scrub every week and a scrub every 24h on every PG.
 
-To avoid any storms the scrub intervals should be setup in ceph.conf to target
+If possible the script will try to avoid scrubbing PGs using the same OSD
+several times in a row, offsetting the scrubs a bit in the future to
+give priority to PGs on OSD without recent scrub activity. With small enough
+PG this should avoid removing too much useful data from disk caches.
+
+To avoid any storm the scrub intervals should be setup in ceph.conf to target
 longer periods. For example:
 
     osd scrub min interval       = 172800 # 60*60*24*2
     osd scrub max interval       = 259200 # 60*60*24*3
     osd deep scrub interval      = 1209600 # 60*60*24*14
-
 
 Dependencies:
 * Ruby 2.0 or later
