@@ -35,11 +35,11 @@ This script is used to avoid scrub or deep-scrub storms. It's setup to run a
 deep-scrub every week and a scrub every 24h on every PG.
 
 To avoid any storms the scrub intervals should be setup in ceph.conf to target
-longer periods.
+longer periods. For example:
 
-> osd scrub min interval       = 172800 # 60*60*24*2
-> osd scrub max interval       = 259200 # 60*60*24*3
-> osd deep scrub interval       = 1209600 # 60*60*24*14
+    osd scrub min interval       = 172800 # 60*60*24*2
+    osd scrub max interval       = 259200 # 60*60*24*3
+    osd deep scrub interval      = 1209600 # 60*60*24*14
 
 
 Dependencies:
