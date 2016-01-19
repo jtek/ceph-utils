@@ -22,6 +22,11 @@ The scheduler tries to restrict IO load and memory usage in several ways. With
 default settings it should not put any significant load on a Ceph OSD and
 should not use significantly more than 100MB by OSD.
 
+When defragmenting, zlib is used to compress data if any compression is used
+for the filesystem mount (this is expected to give better performance when
+reading data back). The defragmentation settings are optimized for 4MB files
+too.
+
 Dependencies:
 * Ruby 2.0 or later
 * filefrag from e2fsprogs
@@ -36,8 +41,8 @@ deep-scrub every week and a scrub every 24h on every PG.
 
 If possible the script will try to avoid scrubbing PGs using the same OSD
 several times in a row, offsetting the scrubs a bit in the future to
-give priority to PGs on OSD without recent scrub activity. With small enough
-PG this should avoid removing too much useful data from disk caches.
+give priority to PGs on OSDs without recent scrub activity. With small enough
+PG sizes this should avoid removing too much useful data from disk caches.
 
 To avoid any storm the scrub intervals should be setup in ceph.conf to target
 longer periods. For example:
