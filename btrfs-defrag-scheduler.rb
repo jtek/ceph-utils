@@ -996,9 +996,9 @@ class BtrfsDev
   end
 
   def stop_processing
-    [ @slow_scan_thread, @stat_thread, @defrag_thread ].each { |thread|
+    [ @slow_scan_thread, @stat_thread, @defrag_thread ].each do |thread|
       Thread.kill(thread)
-    }
+    end
   end
 
   def ceph?; @ceph end
@@ -1361,31 +1361,44 @@ class BtrfsDev
   end
 end
 
-include Outputs
+class BtrfsDevs
+  def initialize
+    @btrfs_devs = []
+    @lock = Mutex.new
+  end
 
-def update_btrfs_devs
-  # Enumerate BTRFS filesystems, avoid autodefrag ones
-  dirs = IO.popen("grep btrfs /proc/mounts | grep -v autodefrag | " +
-                  "awk '{ print $2 }'") { |io|
-    io.readlines.map(&:chomp)
-  }
-  umounted = @btrfs_devs.select { |dev| !dirs.include?(dev.dir) }
-  umounted.each { |dev|
-    info "#{dev.dir} not mounted without autodefrag anymore"
-    dev.stop_processing
-  }
-  @btrfs_devs.reject! { |dev| !dirs.include?(dev.dir) }
-  dirs.each { |dir|
-    unless @btrfs_devs.map(&:dir).include?(dir)
-      info "#{dir} mounted without autodefrag"
-      @btrfs_devs << BtrfsDev.new(dir)
+  def update!
+    # Enumerate BTRFS filesystems, avoid autodefrag ones
+    dirs = IO.popen("grep btrfs /proc/mounts | grep -v autodefrag | " +
+                    "awk '{ print $2 }'") { |io|
+      io.readlines.map(&:chomp)
+    }
+    @lock.synchronize do
+      umounted = @btrfs_devs.select { |dev| !dirs.include?(dev.dir) }
+      umounted.each do |dev|
+        info "#{dev.dir} not mounted without autodefrag anymore"
+        dev.stop_processing
+      end
+      @btrfs_devs.reject! { |dev| umounted.include?(dev) }
+      # Detect remount -o compress=... events
+      @btrfs_devs.each(&:detect_options)
+      dirs.each { |dir|
+        unless @btrfs_devs.map(&:dir).include?(dir)
+          info "#{dir} mounted without autodefrag"
+          @btrfs_devs << BtrfsDev.new(dir)
+        end
+      }
     end
-  }
-  # Detect remount -o compress=... events
-  @btrfs_devs.each(&:detect_options)
+  end
+
+  def handle_file_write(file)
+    @lock.synchronize { @btrfs_devs.each { |dev| dev.claim_file_write(file) } }
+  end
 end
 
-def fatrace_file_writes
+include Outputs
+
+def fatrace_file_writes(devs)
   cmd = "fatrace -f W"
   extract_write_re = /^[^(]+\([0-9]+\): [ORWC]+ (.*)$/
   loop do
@@ -1397,7 +1410,7 @@ def fatrace_file_writes
           next if line.index("btrfs(") == 0
           if match = line.match(extract_write_re)
             file = match[1]
-            @btrfs_devs.find { |dev| dev.claim_file_write(file) }
+            devs.handle_file_write(file)
           else
             error "Can't extract file from '#{line}'"
           end
@@ -1412,14 +1425,13 @@ def fatrace_file_writes
 end
 
 next_dev_update = Time.now
-# Note: this array has some concurrent access, in practice this works
-# with MRI but might not with Jruby or Rubinius for example
-@btrfs_devs = []
-Thread.new { fatrace_file_writes }
+devs = BtrfsDevs.new
+devs.update!
+Thread.new { fatrace_file_writes(devs) }
 
 loop do
-  update_btrfs_devs
   next_dev_update += FS_DETECT_PERIOD
   now = Time.now
   sleep (next_dev_update - now) if now < next_dev_update
+  devs.update!
 end
