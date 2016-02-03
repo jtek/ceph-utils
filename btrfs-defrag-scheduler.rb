@@ -207,6 +207,7 @@ end
 
 # Model for impact on fragmentation performance
 # this emulates a typical 7200t/mn SATA/SAS disk
+# TODO: autodetect or allow configuring other latencies
 module FragmentationCost
   # Disk modelization for computing fragmentation cost
   # A track should be ~1.25MB with current hardware according to
@@ -251,7 +252,7 @@ module FragmentationCost
     if distance < TRACK_SIZE
       # Assume we waste time flying over data from another extent in the
       # same track
-      SEEK_DELAY * (distance / TRACK_SIZE)
+      TRACK_READ_DELAY * (distance / TRACK_SIZE)
     else
       # Assume the drive has to seek with a cost proportional to the distance
       MIN_SEEK + (MAX_SEEK - MIN_SEEK) * distance / (TRACK_COUNT * TRACK_SIZE)
