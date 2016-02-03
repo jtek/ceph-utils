@@ -280,7 +280,8 @@ class FilefragParser
   def add_line(line)
     @buffer << line
     case line
-    when /^Filesystem type is:/, /^ ext:     logical_offset:        physical_offset: length:   expected: flags:/
+    when /^Filesystem type is:/,
+         /^ ext:     logical_offset:        physical_offset: length:   expected: flags:/
       # Headers, ignored
     when /^File size of (.+) is (\d+) /
       @filesize = Regexp.last_match(2).to_i
