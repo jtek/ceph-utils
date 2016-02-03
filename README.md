@@ -39,6 +39,13 @@ Scrub scheduler
 This script is used to avoid scrub or deep-scrub storms. It's setup to run a
 deep-scrub every week and a scrub every 24h on every PG.
 
+WARNING: without modification when an inconsistency is detected it triggers an
+automatic repair (you probably want to change the email address it uses to
+notify the admin when it happens). It works well on Btrfs where but it wasn't
+tested on other filesystems where corrupted data from the primary OSD could be
+copied to the secondary OSDs (Btrfs won't allow corrupted data to be read
+forcing Ceph to get valid data from another OSD).
+
 If possible the script will try to avoid scrubbing PGs using the same OSD
 several times in a row, offsetting the scrubs a bit in the future to
 give priority to PGs on OSDs without recent scrub activity. With small enough
