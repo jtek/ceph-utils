@@ -90,19 +90,22 @@ $output_mutex = Mutex.new
 
 # Synchronize mulithreaded outputs
 module Outputs
+  def short_tstamp
+    Time.now.strftime("%Y%m%d %H%H%S")
+  end
   def error(msg)
     $output_mutex.synchronize {
-      STDERR.puts msg
+      STDERR.puts "#{short_tstamp}: #{msg}"
     }
   end
   def info(msg)
     $output_mutex.synchronize {
-      STDOUT.puts msg
+      STDOUT.puts "#{short_tstamp}: #{msg}"
     }
   end
   def print(msg)
     $output_mutex.synchronize {
-      STDOUT.print msg
+      STDOUT.print "#{short_tstamp}: #{msg}"
     }
   end
 end
