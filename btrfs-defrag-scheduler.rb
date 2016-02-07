@@ -1395,7 +1395,7 @@ class BtrfsDevs
   end
 
   def handle_file_write(file)
-    @lock.synchronize { @btrfs_devs.each { |dev| dev.claim_file_write(file) } }
+    @lock.synchronize { @btrfs_devs.find { |dev| dev.claim_file_write(file) } }
   end
 end
 
