@@ -988,6 +988,10 @@ class BtrfsDev
       info "## #{dir}: processing files in #{find_root_dir}"
     end
     compressed = mounted_with_compress?
+    if compressed.nil?
+      info "## #{dir}: probably umounted"
+      return
+    end
     if @compressed != compressed
       @compressed = compressed
       info "## #{dir}: compressed mount is now #{@compressed ? 'on' : 'off'}"
@@ -1250,6 +1254,7 @@ class BtrfsDev
     mountline = File.read("/proc/mounts").lines.reverse.find { |line|
       line.match(/\S+\s#{dir}\s/)
     }
+    return nil unless mountline
     options = mountline.match(/\S+\s\S+\sbtrfs\s(\S+)/)[1]
     !options.split(',').detect { |option|
       [ "compress=lzo", "compress=zlib",
