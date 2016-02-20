@@ -1433,6 +1433,9 @@ def fatrace_file_writes(devs)
   end
 end
 
+info "**********************************************"
+info "** Starting BTRFS defragmentation scheduler **"
+info "**********************************************"
 next_dev_update = Time.now
 devs = BtrfsDevs.new
 devs.update!
