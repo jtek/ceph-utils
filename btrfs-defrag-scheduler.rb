@@ -985,6 +985,7 @@ class BtrfsDev
     if @ceph != ceph
       @ceph = ceph
       info "## #{dir}: Ceph mode is now #{@ceph ? 'on' : 'off'}"
+      info "## #{dir}: processing files in #{find_root_dir}"
     end
     compressed = mounted_with_compress?
     if @compressed != compressed
