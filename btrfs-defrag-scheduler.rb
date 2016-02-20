@@ -745,7 +745,7 @@ class FilesState
   end
 
   def status
-    info(("## #{@btrfs.dirname} c: %.1f%%; " \
+    info(("# #{@btrfs.dirname} c: %.1f%%; " \
            "(c/u) queued: %d/%d; " \
            "ini: %.2f/%.2f; " \
            "avg: %.2f/%.2f; " \
@@ -1147,7 +1147,7 @@ class BtrfsDev
       frags = FileFragmentation.batch_init(filelist, self)
       queued += @files_state.update_files(frags)
     end
-    info(("## #{@dirname} %d/%ds: %d queued / %d found, " +
+    info(("# #{@dirname} %d/%ds: %d queued / %d found, " +
           "%d defragmented recently, %d changed recently, %d low cost") %
          [ (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
            already_processed, recent,
@@ -1283,7 +1283,7 @@ class BtrfsDev
     @last_processed = processed
     entry = { processed: processed, total: total }
     serialize_entry(@dir, entry, FILE_COUNT_STORE)
-    info "## #{@dirname}, #{entry.inspect}" if total
+    info "# #{@dirname}, #{entry.inspect}" if total
   end
 
   def load_filecount
@@ -1351,7 +1351,7 @@ class BtrfsDev
   def print_slow_status(start, queued, count, already_processed, recent,
                         stopped = false)
     @next_slow_status_printed_at += SLOW_STATUS_PERIOD
-    msg = ("#{stopped ? '##' : '--'} #{@dirname} %d/%ds: %d queued / %d found, " +
+    msg = ("#{stopped ? '#' : '-'} #{@dirname} %d/%ds: %d queued / %d found, " +
            "%d defragmented recently, %d changed recently, %d low cost") %
           [ (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
             already_processed, recent,
