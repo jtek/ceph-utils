@@ -1089,7 +1089,10 @@ class BtrfsDev
     filelist = []
     filelist_arg_length = 0
     start = @last_slow_scan_pause = Time.now
-    @slow_scan_stop_time = start + SLOW_SCAN_PERIOD
+    # If we skip some files, we don't wait for the whole scan period either
+    duration_factor =
+      first_pass ? (@filecount - @last_processed).to_f / @filecount : 1
+    @slow_scan_stop_time = start + duration_factor * SLOW_SCAN_PERIOD
     @next_slow_status_printed_at ||= Time.now
     # Target a batch size for MIN_DELAY_BETWEEN_FILEFRAGS interval between
     # filefrag calls
