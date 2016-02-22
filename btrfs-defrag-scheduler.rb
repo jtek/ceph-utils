@@ -824,12 +824,6 @@ class FilesState
 
     @cost_achievement_history =
       unserialize_entry(@btrfs.dir, HISTORY_STORE, "cost history", default_value)
-    unless @cost_achievement_history[:compressed][0].is_a?(Array)
-      # Support basic migration from earlier format
-      TYPES.each { |t|
-        @cost_achievement_history[t].map! { |v| [ v, v ] }
-      }
-    end
 
     @last_history_serialized_at = Time.now
     # Force thresholds computation
@@ -1296,14 +1290,8 @@ class BtrfsDev
     default_value = { processed: 0, total: nil }
     entry =
       unserialize_entry(@dir, FILE_COUNT_STORE, "filecount", default_value)
-    if entry.is_a?(Integer)
-    # migration from earlier code
-      @last_processed = 0
-      @filecount = entry
-    else
-      @last_processed = entry[:processed]
-      @filecount = entry[:total]
-    end
+    @last_processed = entry[:processed]
+    @filecount = entry[:total]
   end
 
   # Get filecount or a default value
