@@ -818,8 +818,8 @@ class FilesState
   def load_history
     # This is the result of experimentations with Ceph OSDs
     default_value = {
-      compressed: [ 2.65 ] * (COST_HISTORY_SIZE / 100),
-      uncompressed: [ 1.02 ] * (COST_HISTORY_SIZE / 100),
+      compressed: [ 2.65, 2.65 ] * (COST_HISTORY_SIZE / 100),
+      uncompressed: [ 1.02, 1.02 ] * (COST_HISTORY_SIZE / 100),
     }
 
     @cost_achievement_history =
