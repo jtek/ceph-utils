@@ -1446,7 +1446,7 @@ end
 include Outputs
 
 def fatrace_file_writes(devs)
-  cmd = "fatrace -f W"
+  cmd = [ "fatrace", "-f", "W" ]
   extract_write_re = /^[^(]+\([0-9]+\): [ORWC]+ (.*)$/
   loop do
     info("Starting global fatrace thread")
