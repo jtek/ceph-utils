@@ -857,8 +857,8 @@ class FilesState
   def load_history
     # This is the result of experimentations with Ceph OSDs
     default_value = {
-      compressed: [ 2.65, 2.65 ] * (COST_HISTORY_SIZE / 100),
-      uncompressed: [ 1.02, 1.02 ] * (COST_HISTORY_SIZE / 100),
+      compressed: [ [ 2.65, 2.65 ] ] * (COST_HISTORY_SIZE / 100),
+      uncompressed: [ [ 1.02, 1.02 ] ] * (COST_HISTORY_SIZE / 100),
     }
 
     @cost_achievement_history =
@@ -1130,7 +1130,11 @@ class BtrfsDev
     start = @last_slow_scan_pause = Time.now
     # If we skip some files, we don't wait for the whole scan period either
     duration_factor =
-      first_pass ? (@filecount - @last_processed).to_f / @filecount : 1
+      if first_pass && @filecount && @filecount > 0
+        (@filecount - @last_processed).to_f / @filecount
+      else
+        1
+      end
     @slow_scan_stop_time = start + duration_factor * SLOW_SCAN_PERIOD
     @next_slow_status_printed_at ||= Time.now
     # Target a batch size for MIN_DELAY_BETWEEN_FILEFRAGS interval between
