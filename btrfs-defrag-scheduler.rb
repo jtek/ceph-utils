@@ -1,4 +1,47 @@
 #!/usr/bin/ruby
+# coding: utf-8
+
+require 'getoptlong'
+
+def help_exit
+  script_name = File.basename($0)
+  print <<EOMSG
+Usage: #{script_name} [ options ]
+
+Recognised options:
+
+--help (-h)
+    This message
+
+--full-scan-time <value> (-s)
+    Number of hours over which to scan the filesystem (>= 1)
+    defaults to 7 x 24 = 1 week
+
+--target-extent-size <value> (-t)
+    value passed to btrfs filesystem defrag « -t » parameter
+EOMSG
+  exit
+end
+
+opts = GetoptLong.new( [ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
+                       [ '--full-scan-time', '-s',
+                         GetoptLong::REQUIRED_ARGUMENT ],
+                       [ '--target-extent-size', '-t',
+                         GetoptLong::REQUIRED_ARGUMENT ] )
+
+scan_time = nil
+opts.each do |opt,arg|
+  case opt
+  when '--help'
+    help_exit
+  when '--full-scan-time'
+    scan_time = arg.to_i
+    help_exit if scan_time < 1
+  when '--target-extent-size'
+    $default_extent_size = arg
+  end
+end
+
 
 # This defragments Btrfs filesystem files
 # the whole FS is scanned over SLOW_SCAN_PERIOD
@@ -58,7 +101,7 @@ MAX_WRITES_DELAY = 2 * 3600
 
 # Full refresh of fragmentation information on files happens in
 # (pass number of hours on commandline if the default is not wanted)
-SLOW_SCAN_PERIOD = (ARGV[0] ? ARGV[0].to_i : 7 * 24) * 3600 # 1 week
+SLOW_SCAN_PERIOD = (scan_time || 7 * 24) * 3600 # 1 week
 SLOW_SCAN_CATCHUP_WAIT = 600
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 5
@@ -1200,7 +1243,11 @@ class BtrfsDev
         [ "btrfs", "filesystem", "defragment" ]
       end
     # RBD use 4M files, optimize for it
-    cmd += [ "-t", "4M" ] if @ceph
+    if @ceph
+      cmd += [ "-t", "4M" ]
+    elsif $default_extent_size
+      cmd += [ "-t", $default_extent_size ]
+    end
     cmd
   end
 
