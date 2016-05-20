@@ -934,7 +934,7 @@ class FilesState
     end
   end
   def queue_reserve(type)
-    (MAX_QUEUE_LENGTH * type_share(type)).to_i
+    [ (MAX_QUEUE_LENGTH * type_share(type)).to_i, 1 ].max
   end
   def total_queue_size
     TYPES.map{ |t| queue_size(t) }.inject(&:+)
