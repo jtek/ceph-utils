@@ -73,10 +73,6 @@ SPEED_FACTOR_WITH_EMPTY_QUEUE = 0.2
 # (values when queue == MAX_QUEUE_LENGTH)
 # time window => max_device_use_ratio
 DEVICE_USE_LIMITS = {
-  # 5 => 0.12,
-  # 30 => 0.06,
-  # 60 => 0.04,
-  # 120 => 0.03,
   5 => 0.5,
   30 => 0.25,
   60 => 0.16,
