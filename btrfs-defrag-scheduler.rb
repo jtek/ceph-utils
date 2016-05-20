@@ -1452,22 +1452,28 @@ def fatrace_file_writes(devs)
     info("Starting global fatrace thread")
     begin
       IO.popen(cmd) do |io|
-        while line = io.gets do
-          # Skip btrfs commands (defrag mostly)
-          next if line.index("btrfs(") == 0
-          if match = line.match(extract_write_re)
-            file = match[1]
-            devs.handle_file_write(file)
-          else
-            error "Can't extract file from '#{line}'"
+        begin
+          while line = io.gets do
+            # Skip btrfs commands (defrag mostly)
+            next if line.index("btrfs(") == 0
+            if match = line.match(extract_write_re)
+              file = match[1]
+              devs.handle_file_write(file)
+            else
+              error "Can't extract file from '#{line}'"
+            end
           end
+        rescue => ex
+          error "Error in inner fatrace thread: #{ex}"
         end
       end
     rescue => ex
-      error "Error in fatrace thread: #{ex}"
+      error "Error in outer fatrace thread: #{ex}"
     end
     # Arbitrary sleep to avoid CPU load in case of fatrace repeated failure
-    sleep 60
+    delay = 60
+    info("Fatrace thread waiting #{delay}s before restart")
+    sleep delay
   end
 end
 
