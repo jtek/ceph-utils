@@ -1452,6 +1452,7 @@ def fatrace_file_writes(devs)
   cmd = [ "fatrace", "-f", "W" ]
   extract_write_re = /^[^(]+\([0-9]+\): [ORWC]+ (.*)$/
   loop do
+    failed = false
     info("Starting global fatrace thread")
     begin
       last_popen_at = Time.now
@@ -1475,12 +1476,15 @@ def fatrace_file_writes(devs)
         end
       end
     rescue => ex
+      failed = true
       error "Error in outer fatrace thread: #{ex}"
     end
     # Arbitrary sleep to avoid CPU load in case of fatrace repeated failure
-    delay = 60
-    info("Fatrace thread waiting #{delay}s before restart")
-    sleep delay
+    if failed
+      delay = 60
+      info("Fatrace thread waiting #{delay}s before restart")
+      sleep delay
+    end
   end
 end
 
