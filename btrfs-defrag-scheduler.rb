@@ -115,6 +115,9 @@ STATUS_PERIOD = 120 # every 2 minutes
 SLOW_STATUS_PERIOD = 900
 # How often do we check for new filesystems or umounted filesystems
 FS_DETECT_PERIOD = 15
+# When do we restart the fatrace thread
+# (it seems it can lose track of modified files)
+FATRACE_TTL = 24 * 3600 # every day
 
 # System dependent (reserve 100 for cmd and 4096 for one path entry)
 FILEFRAG_ARG_MAX = 131072 - 100 - 4096
@@ -1451,6 +1454,7 @@ def fatrace_file_writes(devs)
   loop do
     info("Starting global fatrace thread")
     begin
+      last_popen_at = Time.now
       IO.popen(cmd) do |io|
         begin
           while line = io.gets do
@@ -1462,6 +1466,9 @@ def fatrace_file_writes(devs)
             else
               error "Can't extract file from '#{line}'"
             end
+            # TODO: Maybe don't check on each pass
+            break if Time.now > (last_popen_at + FATRACE_TTL)
+            break if devs.new_fs?
           end
         rescue => ex
           error "Error in inner fatrace thread: #{ex}"
