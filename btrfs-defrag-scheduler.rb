@@ -1415,6 +1415,7 @@ class BtrfsDevs
   def initialize
     @btrfs_devs = []
     @lock = Mutex.new
+    @new_fs = false
   end
 
   def update!
@@ -1436,6 +1437,7 @@ class BtrfsDevs
         unless @btrfs_devs.map(&:dir).include?(dir)
           info "#{dir} mounted without autodefrag"
           @btrfs_devs << BtrfsDev.new(dir)
+          @new_fs = true
         end
       }
     end
@@ -1443,6 +1445,16 @@ class BtrfsDevs
 
   def handle_file_write(file)
     @lock.synchronize { @btrfs_devs.find { |dev| dev.claim_file_write(file) } }
+  end
+
+  # To call to detect a new fs being added to the watch list
+  def new_fs?
+    copy = false
+    @lock.synchronize do
+      copy = @new_fs
+      @new_fs = false
+    end
+    copy
   end
 end
 
