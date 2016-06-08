@@ -10,8 +10,16 @@ CEPH_EXE = "ceph"
 # Proportion of PG used to choose next candidate (with oldest deep-scrubs)
 CHOICE_WINDOW_PROPORTION = 0.10
 # TODO?: make this deep_scrub_interval - "max_expected_down_time"
+# you must set the "osd deep scrub interval" to 2 weeks in ceph.conf to avoid
+# the automatic deep scrubs to collide with the scheduled ones. This allows pauses
+# in scrubbing for up to one week in a 2 week window, which make rebalancing events
+# easier to handle
 DEEP_SCRUB_TARGET_PERIOD = 7 * 24 * 3600 # 1 week
-SCRUB_TARGET_PERIOD = 24 * 3600    # 1 day
+# Set "osd scrub min interval" to 2 days in ceph.conf
+SCRUB_TARGET_PERIOD = 24 * 3600          # 1 day
+DELAY_WHEN_UNSYNCED = 600                # 10 minutes
+MAX_PARALLEL_DEEP_SCRUBS = 2
+MAX_PARALLEL_SCRUBS = 4
 ADMIN_MAIL = "lionel.bouton@jtek.fr"
 # Assume we get 1/10 of the disk rate (used to delay concurrent activity)
 REPAIR_BYTE_RATE = 100_000_000 / 10
@@ -49,6 +57,11 @@ class Pg
     :last_deep_scrub, :last_deep_scrub_stamp, :last_clean_scrub_stamp,
     :log_size, :ondisk_log_size, :stats_invalid, :stat_sum, :stat_cat_sum, :up,
     :acting, :up_primary, :acting_primary ]
+  UNSYNC_STATES_RE =
+    %w(creat down replay split degraded inconsistent peering repair recover
+       backfill incomplete stale remapped undersized).map do |str|
+    Regexp.new(str)
+  end
   attr_accessor(*ATTRIBUTES)
 
   def initialize(params)
@@ -64,6 +77,30 @@ class Pg
     @last_clean = Time.parse(@last_clean) rescue nil
     @last_fresh = Time.parse(@last_fresh) rescue nile
     @last_unstale = Time.parse(@last_unstale) rescue nile
+  end
+
+  def states
+    state.split("+").map(&:downcase)
+  rescue
+    puts "States parsing for #{pgid} failed (#{state})"
+    return []
+  end
+
+  def scrubbing?
+    states.any? { |state| state.match(/scrub/) }
+  end
+
+  def deep_scrubbing?
+    states.any? { |state| state.match(/deep/) }
+  end
+
+  def unsynced?
+    # This list is prepared from
+    # https://github.com/ceph/ceph/blob/master/doc/rados/operations/pg-states.rst
+    # incomplete match are used for robustness
+    UNSYNC_STATES_RE.any? do |sync_state|
+      states.any? { |state| state.match(sync_state) }
+    end
   end
 
   def repair
@@ -199,8 +236,8 @@ class ActivityState
   end
 
   def pg_available?(pg, blacklist, scrub_type: nil)
-    if pg.state.match(/scrubbing/)
-      if pg.state.match(/deep/)
+    if pg.scrubbing?
+      if pg.deep_scrubbing?
         if scrub_type == :deep
           puts "!! WARNING: #{pg.pgid} still deep scrubbing, skipping"
         end
@@ -267,6 +304,16 @@ class Scheduler
   end
 
   def deep_scrub!(pgs)
+    if pgs.any?(&:unsynced?)
+      puts "!! DELAY deep_scrub: at least one PG unsynced"
+      @next_deep_scrub += DELAY_WHEN_UNSYNCED
+      return
+    end
+    if pgs.select(&:deep_scrubbing?).size >= MAX_PARALLEL_DEEP_SCRUBS
+      puts "!! DELAY deep_scrub: too many deep scrubs"
+      @next_deep_scrub += 60
+      return
+    end
     # Fetch fresh information about PGs and order them by last_deep_scrub_stamp
     pgs = pgs.sort_by { |pg|
       pg.last_deep_scrub_stamp || Time.at(0)
@@ -300,6 +347,16 @@ class Scheduler
   end
 
   def scrub!(pgs)
+    if pgs.any?(&:unsynced?)
+      puts "!! DELAY: at least one PG unsynced"
+      @next_scrub += DELAY_WHEN_UNSYNCED
+      return
+    end
+    if pgs.select(&:scrubbing?).size >= MAX_PARALLEL_SCRUBS
+      puts "!! DELAY scrub: too many scrubs"
+      @next_scrub += 10
+      return
+    end
     # Fetch fresh information about PGs and order them by last_scrub_stamp
     pgs = pgs.sort_by { |pg|
       pg.last_scrub_stamp || Time.at(0)
