@@ -17,7 +17,7 @@ CHOICE_WINDOW_PROPORTION = 0.10
 DEEP_SCRUB_TARGET_PERIOD = 7 * 24 * 3600 # 1 week
 # Set "osd scrub min interval" to 2 days in ceph.conf
 SCRUB_TARGET_PERIOD = 24 * 3600          # 1 day
-DELAY_WHEN_UNSYNCED = 600                # 10 minutes
+DELAY_WHEN_UNSYNCED = 60                 # 1 minute before checking again
 MAX_PARALLEL_DEEP_SCRUBS = 2
 MAX_PARALLEL_SCRUBS = 4
 ADMIN_MAIL = "lionel.bouton@jtek.fr"
