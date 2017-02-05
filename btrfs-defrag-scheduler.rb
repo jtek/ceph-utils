@@ -2,6 +2,7 @@
 # coding: utf-8
 
 require 'getoptlong'
+require 'set'
 
 def help_exit
   script_name = File.basename($0)
@@ -18,27 +19,54 @@ Recognised options:
     defaults to 7 x 24 = 1 week
 
 --target-extent-size <value> (-t)
-    value passed to btrfs filesystem defrag « -t » parameter
+    value passed to btrfs filesystem defrag « -t » parameter (32M)
+
+--verbose (-v)
+    prints defragmention as it happens
+
+--speed-multiplier <value> (-m)
+    slows (<1.0) or speeds (>1.0) the defragmentation process (1.0)
+
+--slow-start <value> (-l)
+    wait for <value> seconds before scanning (600)
 EOMSG
   exit
 end
 
-opts = GetoptLong.new( [ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
-                       [ '--full-scan-time', '-s',
-                         GetoptLong::REQUIRED_ARGUMENT ],
-                       [ '--target-extent-size', '-t',
-                         GetoptLong::REQUIRED_ARGUMENT ] )
+opts = GetoptLong.new([ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
+                      [ '--verbose', '-v', GetoptLong::NO_ARGUMENT ],
+                      [ '--full-scan-time', '-s',
+                        GetoptLong::REQUIRED_ARGUMENT ],
+                      [ '--target-extent-size', '-t',
+                        GetoptLong::REQUIRED_ARGUMENT ],
+                      [ '--speed-multiplier', '-m',
+                        GetoptLong::REQUIRED_ARGUMENT ],
+                      [ '--slow-start', '-l',
+                        GetoptLong::REQUIRED_ARGUMENT ])
 
+# Latest recommendation from BTRFS developpers as of 2016
+$default_extent_size = '32M'
+$verbose = false
+$speed_multiplier = 1.0
+slow_start = 600
 scan_time = nil
 opts.each do |opt,arg|
   case opt
   when '--help'
     help_exit
+  when '--verbose'
+    $verbose = true
   when '--full-scan-time'
     scan_time = arg.to_i
     help_exit if scan_time < 1
   when '--target-extent-size'
     $default_extent_size = arg
+  when '--speed-multiplier'
+    $speed_multiplier = arg.to_f
+    $speed_multiplier = 1.0 if $speed_multiplier <= 0
+  when '--slow-start'
+    slow_start = arg.to_i
+    slow_start = 600 if slow_start <= 0
   end
 end
 
@@ -73,10 +101,10 @@ SPEED_FACTOR_WITH_EMPTY_QUEUE = 0.2
 # (values when queue == MAX_QUEUE_LENGTH)
 # time window => max_device_use_ratio
 DEVICE_USE_LIMITS = {
-  5 => 0.5,
-  30 => 0.25,
-  60 => 0.16,
-  120 => 0.1,
+  5 => 0.5 * $speed_multiplier,
+  30 => 0.25 * $speed_multiplier,
+  60 => 0.16 * $speed_multiplier,
+  120 => 0.1 * $speed_multiplier,
 }
 EXPECTED_COMPRESS_RATIO = 0.5
 
@@ -98,12 +126,12 @@ MAX_WRITES_DELAY = 2 * 3600
 # Full refresh of fragmentation information on files happens in
 # (pass number of hours on commandline if the default is not wanted)
 SLOW_SCAN_PERIOD = (scan_time || 7 * 24) * 3600 # 1 week
-SLOW_SCAN_CATCHUP_WAIT = 600
+SLOW_SCAN_CATCHUP_WAIT = slow_start
 # Sleep constraints between 2 filefrags call in full refresh thread
-MIN_DELAY_BETWEEN_FILEFRAGS = 5
+MIN_DELAY_BETWEEN_FILEFRAGS = 5 / $speed_multiplier
 MAX_DELAY_BETWEEN_FILEFRAGS = 180
 # Batch size constraints for full refresh thread
-MAX_FILES_BATCH_SIZE = 250
+MAX_FILES_BATCH_SIZE = (250 * $speed_multiplier).to_i
 MIN_FILES_BATCH_SIZE = 50
 
 # We ignore files recently defragmented for 4 hours
@@ -114,10 +142,16 @@ MIN_DELAY_BETWEEN_DEFRAGS = 1.5
 STATUS_PERIOD = 120 # every 2 minutes
 SLOW_STATUS_PERIOD = 900
 # How often do we check for new filesystems or umounted filesystems
-FS_DETECT_PERIOD = 15
-# When do we restart the fatrace thread
-# (it seems it can lose track of modified files)
+FS_DETECT_PERIOD = 60
+# How often do we restart the fatrace thread ?
+# there were bugs where fatrace would stop report modifications under
+# some conditions (mounts or remounts, fatrace processes per mountpoint and
+# old fatrace version), it might not apply anymore but this doesn't put any
+# measurable strain on the system
 FATRACE_TTL = 24 * 3600 # every day
+# How often do we check the subvolumes list ?
+# it can be costly but undetected subvolumes aren't traversed
+SUBVOL_TTL = 3600
 
 # System dependent (reserve 100 for cmd and 4096 for one path entry)
 FILEFRAG_ARG_MAX = 131072 - 100 - 4096
@@ -251,7 +285,7 @@ class UsagePolicyChecker
 end
 
 # Model for impact on fragmentation performance
-# this emulates a typical 7200t/mn SATA/SAS disk
+# this emulates a typical 7200tpm SATA/SAS disk
 # TODO: autodetect or allow configuring other latencies
 module FragmentationCost
   # Disk modelization for computing fragmentation cost
@@ -980,10 +1014,11 @@ class BtrfsDev
   include Outputs
   include HashEntrySerializer
 
-  def initialize(dir)
+  # create the internal structures, including references to other mountpoints
+  def initialize(dir, dev_fs_map)
     @dir = dir
     @dirname = File.basename(dir)
-    detect_options
+    detect_options(dev_fs_map)
     load_filecount
     @checker = UsagePolicyChecker.new
     @files_state = FilesState.new(self)
@@ -1014,54 +1049,77 @@ class BtrfsDev
     }
   end
 
-  def detect_options
-    # In Ceph mode, we only defragment the "current" subvolume and avoid
-    # the TEMP directories
-    ceph = !dir.index("ceph/osd").nil?
-    if @ceph != ceph
-      @ceph = ceph
-      info "## #{dir}: Ceph mode is now #{@ceph ? 'on' : 'off'}"
-      info "## #{dir}: processing files in #{find_root_dir}"
-    end
+  def detect_options(dev_fs_map)
+    @my_dev_id = File.stat(dir).dev
+    update_subvol_dirs(dev_fs_map)
+    changed = false
     compressed = mounted_with_compress?
     if compressed.nil?
       info "## #{dir}: probably umounted"
       return
     end
     if @compressed != compressed
+      changed = true
       @compressed = compressed
       info "## #{dir}: compressed mount is now #{@compressed ? 'on' : 'off'}"
     end
     commit_delay = parse_commit_delay
     if @commit_delay != commit_delay
+      changed = true
       @commit_delay = commit_delay
       info "## #{dir}: commit_delay is now #{@commit_delay}"
     end
+    # Reset defrag_cmd if something changed (will be computed on first access)
+    @defrag_cmd = nil if changed
+  end
+
+  def update_subvol_dirs(dev_fs_map)
+    subvol_dirs_list = BtrfsDev.list_rw_subvolumes(dir)
+    fs_map = {}
+    dev_list = Set.new
+    rw_subvols = Set.new
+    subvol_dirs_list.each do |subvol|
+      full_path = "#{dir}/#{subvol}"
+      rw_subvols << full_path
+      dev_id = File.stat(full_path).dev
+      other_fs = dev_fs_map[dev_id]
+      other_fs.each { |fs| fs_map[fs] = full_path }
+      dev_list << dev_id
+    end
+    dev_list << File.stat(dir).dev
+    if fs_map != @fs_map
+      info "-- #{dir}: changed filesystem maps"
+      info fs_map.inspect
+      @fs_map = fs_map
+    end
+    @dev_list = dev_list
+    @rw_subvols = rw_subvols
+  end
+
+  def rw_subvol?(dir)
+    @rw_subvols.include?(dir)
   end
 
   def stop_processing
     [ @slow_scan_thread, @stat_thread, @defrag_thread ].each do |thread|
-      Thread.kill(thread)
+      Thread.kill(thread) if thread
     end
   end
 
-  def ceph?; @ceph end
+  def has_dev?(dev_id)
+    @dev_list.include?(dev_id)
+  end
+
   def commit_delay; @commit_delay end
   def prune?(entry)
-    if @ceph
-      File.directory?(entry) &&
-        (entry.end_with?("TEMP") ||
-        ((entry != find_root_dir) && Pathname.new(entry).mountpoint?))
-    else
-      File.directory?(entry) && (entry != find_root_dir) &&
-        Pathname.new(entry).mountpoint?
-    end
+    File.directory?(entry) && (entry != dir) &&
+      Pathname.new(entry).mountpoint? && !rw_subvol?(entry)
   rescue
     # Pathname#mountpoint can't process some entries
     false
   end
   def skip_defrag?(filename)
-    return !filename.start_with?(find_root_dir) || filename.end_with?(" (deleted)")
+    filename.end_with?(" (deleted)")
   end
 
   # Manage queue of asynchronously defragmented files
@@ -1114,9 +1172,18 @@ class BtrfsDev
   end
 
   def claim_file_write(filename)
-    return false unless filename.index(find_root_dir) == 0
-    @files_state.file_written_to(filename) unless skip_defrag?(filename)
+    local_name = position_on_fs(filename)
+    return false unless local_name
+    @files_state.file_written_to(local_name) unless skip_defrag?(local_name)
     true
+  end
+
+  def position_on_fs(filename)
+    return filename if filename.index(dir) == 0
+    subvol_fs = @fs_map.keys.find { |fs| filename.index(fs) == 0 }
+    return nil unless subvol_fs
+    # This is a local file, triggered from another subdir, move in our domain
+    filename.gsub(subvol_fs, @fs_map[subvol_fs])
   end
 
   # Slowly update files, targeting a SLOW_SCAN_PERIOD period for all updates
@@ -1146,7 +1213,7 @@ class BtrfsDev
       [ MIN_DELAY_BETWEEN_FILEFRAGS * filecount / SLOW_SCAN_PERIOD,
         MIN_FILES_BATCH_SIZE ].max
     begin
-      Find.find(find_root_dir) do |path|
+      Find.find(dir) do |path|
         if prune?(path)
           Find.prune
         else
@@ -1164,7 +1231,12 @@ class BtrfsDev
           end
           # rescue Time.now -> disapearring file considered recent (and ignored)
           last_modification =
-            [ File.mtime(path), File.ctime(path) ].max rescue Time.now
+            begin
+              stat = File.stat(path)
+              [ stat.mtime, stat.ctime(path) ].max
+            rescue
+              Time.now
+            end
           if last_modification > (Time.now - (commit_delay + 5))
             recent += 1
             next
@@ -1185,7 +1257,7 @@ class BtrfsDev
         end
       end
     rescue => ex
-      error("Couldn't process #{find_root_dir}: " \
+      error("Couldn't process #{dir}: " \
             "#{ex}\n#{ex.backtrace.join("\n")}")
       # Don't wait for a SLOW_SCAN_PERIOD
       @slow_scan_stop_time = Time.now + MIN_DELAY_BETWEEN_FILEFRAGS
@@ -1224,6 +1296,7 @@ class BtrfsDev
       @files_state.defragmented!(shortname)
       run_with_device_usage(usage: file_frag.defrag_time) {
         cmd = defrag_cmd + [ file_frag.filename ]
+        info "-- #{dir}: #{cmd.join(" ")}" if $verbose
         system(*cmd)
       }
       # We mark it again to clear up any writes detected concurrently
@@ -1239,27 +1312,25 @@ class BtrfsDev
 
   # Only recompress if we are already compressing data
   def defrag_cmd
+    return @defrag_cmd if @defrag_cmd
     cmd =
       if @compressed
         [ "btrfs", "filesystem", "defragment", "-czlib" ]
       else
         [ "btrfs", "filesystem", "defragment" ]
       end
-    # RBD use 4M files, optimize for it
-    if @ceph
-      cmd += [ "-t", "4M" ]
-    elsif $default_extent_size
+    if $default_extent_size
       cmd += [ "-t", $default_extent_size ]
     end
-    cmd
+    @defrag_cmd = cmd
   end
 
   # We prefer to store short filenames to free memory
   def short_filename(filename)
-    filename.gsub(find_root_dir, "")
+    filename.gsub("#{dir}/", "")
   end
   def full_filename(short_filename)
-    "#{find_root_dir}#{short_filename}"
+    "#{dir}/#{short_filename}"
   end
   def file_id(short_filename)
     "#{@dirname}: #{short_filename}"
@@ -1293,16 +1364,9 @@ class BtrfsDev
     return result
   end
 
-  def find_root_dir
-    ceph? ? "#{@dir}/current/" : @dir
-  end
-
   def mounted_with_compress?
-    mountline = File.read("/proc/mounts").lines.reverse.find { |line|
-      line.match(/\S+\s#{dir}\s/)
-    }
-    return nil unless mountline
-    options = mountline.match(/\S+\s\S+\sbtrfs\s(\S+)/)[1]
+    options = mount_options
+    return nil unless options
     !options.split(',').detect { |option|
       [ "compress=lzo", "compress=zlib",
         "compress-force=lzo", "compress-force=zlib" ].include?(option)
@@ -1311,10 +1375,8 @@ class BtrfsDev
 
   def parse_commit_delay
     delay = nil
-    mountline = File.read("/proc/mounts").lines.reverse.find { |line|
-      line.match(/\S+\s#{dir}\s/)
-    }
-    options = mountline.match(/\S+\s\S+\sbtrfs\s(\S+)/)[1]
+    options = mount_options
+    return unless options
     options.split(',').each { |option|
       if option.match(/^commit=(\d+)/)
         delay = Regexp.last_match[1].to_i
@@ -1322,6 +1384,16 @@ class BtrfsDev
       end
     }
     return delay || DEFAULT_COMMIT_DELAY
+  end
+
+  def mount_line
+    File.read("/proc/mounts").lines.reverse.find { |line|
+      line.match(/\S+\s#{dir}\s/)
+    }
+  end
+
+  def mount_options
+    mount_line && mount_line.match(/\S+\s\S+\sbtrfs\s(\S+)/)[1]
   end
 
   def update_filecount(processed: nil, total: nil)
@@ -1373,7 +1445,8 @@ class BtrfsDev
       # Count time spent computing a batch to compensate for it
       batch_delay = Time.now - @last_slow_scan_pause
       interval =
-        (@slow_scan_stop_time - Time.now) * @slow_batch_size / @slow_pass_expected_left
+        (@slow_scan_stop_time - Time.now) * @slow_batch_size /
+        @slow_pass_expected_left
       sleep([ [ interval - batch_delay, MIN_DELAY_BETWEEN_FILEFRAGS ].max,
               MAX_DELAY_BETWEEN_FILEFRAGS ].min)
     else
@@ -1409,6 +1482,29 @@ class BtrfsDev
     end
     info msg
   end
+
+  class << self
+    def list_subvolumes(dir)
+      new_subdirs = []
+      IO.popen([ "btrfs", "subvolume", "list", dir ]) do |io|
+        while line = io.gets do
+          line.chomp!
+          if match = line.match(/^.* path (.*)$/)
+            new_subdirs << match[1]
+          else
+            error "can't parse #{line}"
+          end
+        end
+      end
+      new_subdirs
+    end
+
+    def list_rw_subvolumes(dir)
+      list_subvolumes(dir).select do |subdir|
+        File.writable?("#{dir}/#{subdir}")
+      end
+    end
+  end
 end
 
 class BtrfsDevs
@@ -1421,9 +1517,9 @@ class BtrfsDevs
   def update!
     # Enumerate BTRFS filesystems, avoid autodefrag ones
     dirs = IO.popen("grep btrfs /proc/mounts | grep -v autodefrag | " +
-                    "awk '{ print $2 }'") { |io|
-      io.readlines.map(&:chomp)
-    }
+                    "awk '{ print $2 }'") { |io| io.readlines.map(&:chomp) }
+    dev_fs_map = Hash.new { |hash, key| hash[key] = Set.new }
+    dirs.each { |dir| dev_fs_map[File.stat(dir).dev] << dir }
     @lock.synchronize do
       umounted = @btrfs_devs.select { |dev| !dirs.include?(dev.dir) }
       umounted.each do |dev|
@@ -1432,13 +1528,14 @@ class BtrfsDevs
       end
       @btrfs_devs.reject! { |dev| umounted.include?(dev) }
       # Detect remount -o compress=... events
-      @btrfs_devs.each(&:detect_options)
+      @btrfs_devs.each { |dev| dev.detect_options(dev_fs_map) }
       dirs.each { |dir|
-        unless @btrfs_devs.map(&:dir).include?(dir)
-          info "#{dir} mounted without autodefrag"
-          @btrfs_devs << BtrfsDev.new(dir)
-          @new_fs = true
-        end
+        next unless top_volume?(dir)
+        next if known?(dir)
+        next if @btrfs_devs.map(&:dir).include?(dir)
+        info "#{dir} mounted without autodefrag"
+        @btrfs_devs << BtrfsDev.new(dir, dev_fs_map)
+        @new_fs = true
       }
     end
   end
@@ -1455,6 +1552,17 @@ class BtrfsDevs
       @new_fs = false
     end
     copy
+  end
+
+  def top_volume?(dir)
+    BtrfsDev.list_subvolumes(dir).all? do |subdir|
+      Pathname.new("#{dir}/#{subdir}").mountpoint?
+    end
+  end
+
+  def known?(dir)
+    dev_id = File.stat(dir).dev
+    @btrfs_devs.any? { |btrfs_dev| btrfs_dev.has_dev?(dev_id) }
   end
 end
 
