@@ -1052,6 +1052,7 @@ class BtrfsDev
   def detect_options(dev_fs_map)
     @my_dev_id = File.stat(dir).dev
     update_subvol_dirs(dev_fs_map)
+    load_exceptions
     changed = false
     compressed = mounted_with_compress?
     if compressed.nil?
@@ -1096,6 +1097,23 @@ class BtrfsDev
     @rw_subvols = rw_subvols
   end
 
+  def load_exceptions
+    no_defrag_list = []
+    exceptions_file = "#{dir}/.no_defrag"
+    if File.readable?(exceptions_file)
+      no_defrag_list =
+        File.read(exceptions_file).split("\n").map { |path| "#{dir}/#{path}" }
+    end
+    if no_defrag_list.any? && (@no_defrag_list != no_defrag_list)
+      info "-- #{dir} blacklist: #{no_defrag_list.inspect}"
+    end
+    @no_defrag_list = no_defrag_list 
+  end
+
+  def blacklisted?(filename)
+    @no_defrag_list.any? { |blacklist| filename.index(blacklist) == 0 }
+  end
+
   def rw_subvol?(dir)
     @rw_subvols.include?(dir)
   end
@@ -1112,14 +1130,15 @@ class BtrfsDev
 
   def commit_delay; @commit_delay end
   def prune?(entry)
-    File.directory?(entry) && (entry != dir) &&
-      Pathname.new(entry).mountpoint? && !rw_subvol?(entry)
+    (File.directory?(entry) && (entry != dir) &&
+     Pathname.new(entry).mountpoint? && !rw_subvol?(entry)) ||
+      blacklisted?(entry)
   rescue
     # Pathname#mountpoint can't process some entries
     false
   end
   def skip_defrag?(filename)
-    filename.end_with?(" (deleted)")
+    filename.end_with?(" (deleted)") || blacklisted?(filename)
   end
 
   # Manage queue of asynchronously defragmented files
