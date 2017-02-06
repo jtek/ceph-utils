@@ -1252,7 +1252,7 @@ class BtrfsDev
           last_modification =
             begin
               stat = File.stat(path)
-              [ stat.mtime, stat.ctime(path) ].max
+              [ stat.mtime, stat.ctime ].max
             rescue
               Time.now
             end
