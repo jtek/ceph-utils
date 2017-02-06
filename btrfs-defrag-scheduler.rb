@@ -79,7 +79,7 @@ end
 # Used to remeber how low the cost is brought down
 # higher values means more stable behaviour in the effort made
 # to defragment
-COST_HISTORY_SIZE = 1000
+COST_HISTORY_SIZE = 2000
 # Tune this to change the effort made to defragment (1.0: max effort)
 MIN_EXPECTED_BENEFIT_RANGE = (1.05..2.0)
 # How fast the value of the target_benefit can move (per second)
@@ -711,9 +711,9 @@ class FilesState
     end
   end
 
-  def historize_cost_achievement(file_frag, initial_cost, final_cost)
+  def historize_cost_achievement(file_frag, initial_cost, final_cost, size)
     key = file_frag.majority_compressed? ? :compressed : :uncompressed
-    @cost_achievement_history[key] << [ initial_cost, final_cost ]
+    @cost_achievement_history[key] << [ initial_cost, final_cost, size ]
     if @cost_achievement_history[key].size > COST_HISTORY_SIZE
       @cost_achievement_history[key].shift
     end
@@ -847,8 +847,12 @@ class FilesState
     TYPES.each { |key|
       size = @cost_achievement_history[key].size
       # We want a weighted percentile, higher weight for more recent costs
-      threshold_weight =
-        (size * (size + 1) / 2) * COST_THRESHOLD_PERCENTILE / 100
+      threshold_weight = 0
+      # This is now weighted and can't be computed from the size
+      @cost_achievement_history[key].each_with_index { |costs, index|
+        threshold_weight = costs[2] * (index + 1)
+      }
+      threshold_weight *= (COST_THRESHOLD_PERCENTILE.to_f / 100)
       ordered_history =
       @cost_achievement_history[key].each_with_index.map { |costs,index|
         [ costs, index + 1 ]
@@ -860,16 +864,18 @@ class FilesState
       # This will stop as soon as we reach the percentile
       while total_weight < threshold_weight
         result, weight = ordered_history.shift
-        initial_accu += result[0] * weight
-        final_accu += result[1] * weight
-        total_weight += weight
+        initial_accu += result[0] * result[2] * weight
+        final_accu += result[1] * result[2] * weight
+        total_weight += result[2] * weight
       end
+      # Percentile reached
       @cost_thresholds[key] = result[1] * target_benefit(key)
+      # Continue with the rest
       while ordered_history.any?
         result, weight = ordered_history.shift
-        initial_accu += result[0] * weight
-        final_accu += result[1] * weight
-        total_weight += weight
+        initial_accu += result[0] * result[2] * weight
+        final_accu += result[1] * result[2] * weight
+        total_weight += result[2] * weight
       end
       @average_costs[key] = final_accu / total_weight
       @initial_costs[key] = initial_accu / total_weight
@@ -894,12 +900,19 @@ class FilesState
   def load_history
     # This is the result of experimentations with Ceph OSDs
     default_value = {
-      compressed: [ [ 2.65, 2.65 ] ] * (COST_HISTORY_SIZE / 100),
-      uncompressed: [ [ 1.02, 1.02 ] ] * (COST_HISTORY_SIZE / 100),
+      compressed: [ [ 2.65, 2.65, 1_000_000 ] ] * (COST_HISTORY_SIZE / 100),
+      uncompressed: [ [ 1.02, 1.02, 1_000_000 ] ] * (COST_HISTORY_SIZE / 100),
     }
 
     @cost_achievement_history =
       unserialize_entry(@btrfs.dir, HISTORY_STORE, "cost history", default_value)
+
+    # Update previous versions without sizes
+    TYPES.each do |key|
+      @cost_achievement_history[key].map! do |cost|
+        cost.size == 3 ? cost : cost << 1_000_000
+      end
+    end
 
     @last_history_serialized_at = Time.now
     # Force thresholds computation
@@ -1151,6 +1164,7 @@ class BtrfsDev
         last_change: queued_at,
         last_cost: file_frag.fragmentation_cost,
         start_cost: file_frag.fragmentation_cost,
+        size: file_frag.size
       }
     }
   end
@@ -1166,16 +1180,9 @@ class BtrfsDev
             ((Time.now - last_change) > 6)) ||
             (Time.now - start) > 35
           to_remove << key
-          # status =
-          #   "%s: %.2f%s" % [ file_id(key.short_filename), value[:start_cost],
-          #   value[:compressed] ? 'c' : 'u' ]
-          # if value[:start_cost] != value[:old_cost]
-          #   status << " (was %.2f)" % value[:old_cost]
-          # end
-          # status << (" -> %.2f%s" % [ value[:last_cost],
-          #     key.majority_compressed? ? 'c' : 'u' ] )
           @files_state.historize_cost_achievement(key, value[:start_cost],
-                                                  value[:last_cost])
+                                                  value[:last_cost],
+                                                  value[:size])
           # info status
         else
           key.update_fragmentation
@@ -1252,12 +1259,12 @@ class BtrfsDev
             already_processed += 1
             next
           end
-          # rescue Time.now -> disapearring file considered recent (and ignored)
           last_modification =
             begin
               stat = File.stat(path)
               [ stat.mtime, stat.ctime ].max
             rescue
+              # disapearring file considered recent (and ignored)
               Time.now
             end
           if last_modification > (Time.now - (commit_delay + 5))
