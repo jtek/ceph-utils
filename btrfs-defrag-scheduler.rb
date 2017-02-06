@@ -1233,6 +1233,10 @@ class BtrfsDev
         MIN_FILES_BATCH_SIZE ].max
     begin
       Find.find(dir) do |path|
+        if @next_slow_status_printed_at <= Time.now
+          info "-- #{dir}: #{short_filename(path)}" if $verbose
+          print_slow_status(start, queued, count, already_processed, recent)
+        end
         if prune?(path)
           Find.prune
         else
@@ -1271,9 +1275,6 @@ class BtrfsDev
             wait_before_next_slow_scan_pass(count)
           end
         end
-        if @next_slow_status_printed_at <= Time.now
-          print_slow_status(start, queued, count, already_processed, recent)
-        end
       end
     rescue => ex
       error("Couldn't process #{dir}: " \
@@ -1297,31 +1298,46 @@ class BtrfsDev
   end
   
   def defrag!
-    if @files_state.any_interesting_file? && available_for_defrag?
-      file_frag = @files_state.pop_most_interesting
-      # Check that file still exists
-      return unless file_frag && File.file?(file_frag.filename)
+    file_frag = get_next_file_to_defrag
+    return unless file_frag
+    shortname = file_frag.short_filename
 
-      file_frag.update_fragmentation
-      shortname = file_frag.short_filename
-      # Skip files that are already below target and reset tracking
-      # to avoid future work if there aren't any more writes
-      if @files_state.below_threshold_cost(file_frag)
-        @files_state.remove_tracking(shortname)
-        return
-      end
+    # We declare it defragmented ASAP to avoid a double queue
+    @files_state.defragmented!(shortname)
+    run_with_device_usage(usage: file_frag.defrag_time) {
+      cmd = defrag_cmd + [ file_frag.filename ]
+      info "-- #{dir}: #{cmd.join(" ")}" if $verbose
+      system(*cmd)
+    }
+    # We mark it again to clear up any writes detected concurrently
+    @files_state.defragmented!(shortname)
+    stat_queue(file_frag)
+  end
 
-      # We declare it defragmented ASAP to avoid a double queue
-      @files_state.defragmented!(shortname)
-      run_with_device_usage(usage: file_frag.defrag_time) {
-        cmd = defrag_cmd + [ file_frag.filename ]
-        info "-- #{dir}: #{cmd.join(" ")}" if $verbose
-        system(*cmd)
-      }
-      # We mark it again to clear up any writes detected concurrently
-      @files_state.defragmented!(shortname)
-      stat_queue(file_frag)
+  # recursively search for the next file to defrag
+  def get_next_file_to_defrag
+    return nil if !@files_state.any_interesting_file? || !available_for_defrag?
+    file_frag = @files_state.pop_most_interesting
+    shortname = file_frag.short_filename
+    # Check that file still exists
+    unless file_frag && File.file?(file_frag.filename)
+      @files_state.remove_tracking(shortname)
+      return get_next_file_to_defrag
     end
+    file_frag.update_fragmentation
+    # Skip files that are already below target and reset tracking
+    # to avoid future work if there aren't any more writes
+    if @files_state.below_threshold_cost(file_frag)
+      @files_state.remove_tracking(shortname)
+      return get_next_file_to_defrag
+    end
+
+    if @files_state.recently_defragmented?(shortname)
+      @files_state.remove_tracking(shortname)
+      return get_next_file_to_defrag
+    end
+
+    file_frag
   end
 
   def available_for_defrag?
