@@ -28,7 +28,7 @@ must be mounted somewhere to be considered). You must mount the filesystem
 without autodefrag (or remount it with '-o remount,noautodefrag') or it will
 be ignored until you do so.
 Placing a '.no-defrag' file on the top volume root with one relative directory
-(without a leading '/) will instruct it to ignore all files below in these
+(without a leading '/') will instruct it to ignore all files below in these
 subtrees *including* all mountpoints of subvolumes included in these subtrees.
 Use this file to avoid defragmenting data when competition for defragmentation
 between several read-write copies of the same files exist between different
