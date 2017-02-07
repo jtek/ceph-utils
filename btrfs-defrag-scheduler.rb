@@ -29,6 +29,9 @@ Recognised options:
 
 --slow-start <value> (-l)
     wait for <value> seconds before scanning (600)
+
+--drive-count <value> (-d)
+    number of 7200rpm drives behind the filesystem (1)
 EOMSG
   exit
 end
@@ -42,12 +45,15 @@ opts = GetoptLong.new([ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
                       [ '--speed-multiplier', '-m',
                         GetoptLong::REQUIRED_ARGUMENT ],
                       [ '--slow-start', '-l',
+                        GetoptLong::REQUIRED_ARGUMENT ],
+                      [ '--drive-count', '-d',
                         GetoptLong::REQUIRED_ARGUMENT ])
 
 # Latest recommendation from BTRFS developpers as of 2016
 $default_extent_size = '32M'
 $verbose = false
 $speed_multiplier = 1.0
+$drive_count = 1
 slow_start = 600
 scan_time = nil
 opts.each do |opt,arg|
@@ -67,6 +73,9 @@ opts.each do |opt,arg|
   when '--slow-start'
     slow_start = arg.to_i
     slow_start = 600 if slow_start <= 0
+  when '--drive-count'
+    $drive_count = arg.to_f
+    $drive_count = 1 if $drive_count < 1
   end
 end
 
@@ -137,7 +146,7 @@ MIN_FILES_BATCH_SIZE = 50
 # We ignore files recently defragmented for 4 hours
 IGNORE_AFTER_DEFRAG_DELAY = 4 * 3600
 
-MIN_DELAY_BETWEEN_DEFRAGS = 1.5
+MIN_DELAY_BETWEEN_DEFRAGS = 1.5 / $speed_multiplier
 # How often do we dump a status update
 STATUS_PERIOD = 120 # every 2 minutes
 SLOW_STATUS_PERIOD = 900
@@ -304,6 +313,7 @@ module FragmentationCost
   SEEK_DELAY = (MIN_SEEK + MAX_SEEK) / 2
   # BTRFS parameters
   BTRFS_COMPRESSION_EXTENT_BLOCK_COUNT = 32
+  DRIVE_COUNT = $drive_count
 
   def fragmentation_cost(size, seek_time)
     if (size == 0) || (seek_time == 0)
@@ -311,8 +321,8 @@ module FragmentationCost
     else
       # How much time needed to read data
       # initial seek, sequential read time, seek cost
-      total = SEEK_DELAY + (size.to_f / TRANSFER_RATE) + seek_time
-      ideal = SEEK_DELAY + (size.to_f / TRANSFER_RATE)
+      total = seek_delay + (size.to_f / transfer_rate) + seek_time
+      ideal = seek_delay + (size.to_f / transfer_rate)
       total / ideal
     end
   end
@@ -334,12 +344,13 @@ module FragmentationCost
       TRACK_READ_DELAY * (distance / TRACK_SIZE)
     else
       # Assume the drive has to seek with a cost proportional to the distance
-      MIN_SEEK + (MAX_SEEK - MIN_SEEK) * distance / (TRACK_COUNT * TRACK_SIZE)
+      MIN_SEEK + (MAX_SEEK - MIN_SEEK) * distance /
+                 (TRACK_COUNT * TRACK_SIZE * DRIVE_COUNT)
     end
   end
 
   def transfer_rate
-    TRANSFER_RATE
+    TRANSFER_RATE * DRIVE_COUNT
   end
   def seek_delay
     SEEK_DELAY
