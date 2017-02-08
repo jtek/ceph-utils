@@ -1270,18 +1270,18 @@ class BtrfsDev
             already_processed += 1
             next
           end
+          stat = File.stat(path) rescue nil
+          next unless stat
           last_modification =
-            begin
-              stat = File.stat(path)
-              [ stat.mtime, stat.ctime ].max
-            rescue
-              # disapearring file considered recent (and ignored)
-              Time.now
-            end
+            [ stat.mtime, stat.ctime ].max
           if last_modification > (Time.now - (commit_delay + 5))
             recent += 1
             next
           end
+          # TODO: check minimum allocation size (16k according to btrfs-users@?)
+          # File too small to be fragmented?
+          next if stat.size <= 4096
+
           filelist << path
           filelist_arg_length += (path.size + 1) # count space
 
