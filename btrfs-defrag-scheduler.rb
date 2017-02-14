@@ -1013,15 +1013,21 @@ class FilesState
     TYPES.each { |t| adjust_target(t, delay) }
   end
   def adjust_target(key, delay)
-    diff = queue_size(key) - (queue_reserve(key) / 2)
-    target_relative_diff = diff.to_f / (queue_reserve(key) / 2)
-    target_relative_diff = [ 1.0, target_relative_diff ].min
+    diff =
+      # queue size becomes too large punish compressed and/or uncompressed
+      if total_queue_size > (MAX_QUEUE_LENGTH / 2)
+        queue_size(key) - (queue_reserve(key) / 2)
+      else
+        # don't punish anyone, let the queues grow
+        total_queue_size - (MAX_QUEUE_LENGTH / 2)
+      end
+    target_relative_diff = [ 1.0, diff.to_f / (queue_reserve(key) / 2) ].min
     velocity =
       MIN_EXPECTED_BENEFIT_MAX_ACCELERATION ** (delay * target_relative_diff)
     target =
       @target_benefit[key] * velocity
-    target = [ target, MIN_EXPECTED_BENEFIT_RANGE.min ].max
-    target = [ target, MIN_EXPECTED_BENEFIT_RANGE.max ].min
+    target = [ [ target, MIN_EXPECTED_BENEFIT_RANGE.min ].max,
+               MIN_EXPECTED_BENEFIT_RANGE.max ].min
     @target_benefit[key] = target
   end
 end
