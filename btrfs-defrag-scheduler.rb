@@ -246,10 +246,6 @@ class UsagePolicyChecker
     @device_uses << [ start, duration ]
   end
 
-  def last_duration
-    @device_uses[-1][1]
-  end
-
   # If expected_time is passed, this tries to remain below the thresholds
   # until there isn't any tracked device_use left
   def available?(queue_fill_proportion, expected_time = 0)
@@ -1400,7 +1396,7 @@ class BtrfsDev
   end
 
   private
-  def run_with_device_usage(usage: nil, factor: nil)
+  def run_with_device_usage(usage: nil)
     start = Time.now
     result = yield
     duration = Time.now - start
@@ -1415,8 +1411,7 @@ class BtrfsDev
       end
       @checker.add_usage(start, usage)
     else
-      factor ||= 1
-      @checker.add_usage(start, (stop - start) * factor)
+      @checker.add_usage(start, duration)
     end
     return result
   end
