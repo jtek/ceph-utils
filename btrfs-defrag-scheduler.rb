@@ -1334,7 +1334,7 @@ class BtrfsDev
 
   # recursively search for the next file to defrag
   def get_next_file_to_defrag
-    return nil if !@files_state.any_interesting_file? || !available_for_defrag?
+    return nil unless @files_state.any_interesting_file? && available_for_defrag?
     file_frag = @files_state.pop_most_interesting
     shortname = file_frag.short_filename
     # Check that file still exists
