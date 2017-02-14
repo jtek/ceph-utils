@@ -584,11 +584,11 @@ class FilesState
   # This is considered acceptable and may be protected by caller if needed
   class FuzzyEventTracker
     # Must be 1, 2, 4 or 8 depending on the precision objective
-    BITS_PER_ENTRY = 2
+    # higher value can avoid temporary high spikes of queued files
+    BITS_PER_ENTRY = 4
     # Should be enough: we don't expect to defragment more than 1/s
     # there's an hardcoded limit of 24 in position_offset
-    ENTRIES_INDEX_BITS = 17
-    ENTRIES_INDEX_SIZE = (ENTRIES_INDEX_BITS.to_f / 8).ceil
+    ENTRIES_INDEX_BITS = 18
     MAX_ENTRIES = 2 ** ENTRIES_INDEX_BITS
     ENTRIES_PER_BYTE = 8 / BITS_PER_ENTRY
     MAX_ENTRY_VALUE = (2 ** BITS_PER_ENTRY) - 1
