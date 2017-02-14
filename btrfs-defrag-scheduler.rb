@@ -1324,11 +1324,15 @@ class BtrfsDev
     @files_state.defragmented!(shortname)
     run_with_device_usage(usage: file_frag.defrag_time) {
       cmd = defrag_cmd + [ file_frag.filename ]
-      info "-- #{dir}: #{cmd.join(" ")}" if $verbose
+      if $verbose
+        info("-- #{dir}: #{shortname} (" +
+             (file_frag.majority_compressed? ? "C" : "U") +
+             ")")
+      end
       system(*cmd)
     }
-    # We mark it again to clear up any writes detected concurrently
-    @files_state.defragmented!(shortname)
+    # Clear up any writes detected concurrently
+    @files_state.remove_tracking(shortname)
     stat_queue(file_frag)
   end
 
