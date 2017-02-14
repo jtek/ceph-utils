@@ -1449,9 +1449,10 @@ class BtrfsDev
     run_with_device_usage(usage: file_frag.defrag_time) {
       cmd = defrag_cmd + [ file_frag.filename ]
       if $verbose
-        info("-- #{dir}: #{shortname} (" +
-             (file_frag.majority_compressed? ? "C" : "U") +
-             ")")
+        msg = "-- #{dir}: #{shortname} (%s:%.2f)" %
+              [ (file_frag.majority_compressed? ? "C" : "U"),
+                file_frag.fragmentation_cost ]
+        info(msg)
       end
       system(*cmd)
     }
