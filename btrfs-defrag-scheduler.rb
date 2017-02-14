@@ -3,6 +3,7 @@
 
 require 'getoptlong'
 require 'set'
+require 'digest'
 
 def help_exit
   script_name = File.basename($0)
@@ -24,13 +25,16 @@ Recognised options:
 --verbose (-v)
     prints defragmention as it happens
 
+--debug (-d)
+    prints internal processes information
+
 --speed-multiplier <value> (-m)
     slows (<1.0) or speeds (>1.0) the defragmentation process (1.0)
 
 --slow-start <value> (-l)
     wait for <value> seconds before scanning (600)
 
---drive-count <value> (-d)
+--drive-count <value> (-c)
     number of 7200rpm drives behind the filesystem (1)
 EOMSG
   exit
@@ -38,6 +42,7 @@ end
 
 opts = GetoptLong.new([ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
                       [ '--verbose', '-v', GetoptLong::NO_ARGUMENT ],
+                      [ '--debug', '-d', GetoptLong::NO_ARGUMENT ],
                       [ '--full-scan-time', '-s',
                         GetoptLong::REQUIRED_ARGUMENT ],
                       [ '--target-extent-size', '-t',
@@ -46,12 +51,13 @@ opts = GetoptLong.new([ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
                         GetoptLong::REQUIRED_ARGUMENT ],
                       [ '--slow-start', '-l',
                         GetoptLong::REQUIRED_ARGUMENT ],
-                      [ '--drive-count', '-d',
+                      [ '--drive-count', '-c',
                         GetoptLong::REQUIRED_ARGUMENT ])
 
 # Latest recommendation from BTRFS developpers as of 2016
 $default_extent_size = '32M'
 $verbose = false
+$debug = false
 $speed_multiplier = 1.0
 $drive_count = 1
 slow_start = 600
@@ -62,6 +68,8 @@ opts.each do |opt,arg|
     help_exit
   when '--verbose'
     $verbose = true
+  when '--debug'
+    $debug = true
   when '--full-scan-time'
     scan_time = arg.to_i
     help_exit if scan_time < 1
@@ -143,8 +151,8 @@ MAX_DELAY_BETWEEN_FILEFRAGS = 180
 MAX_FILES_BATCH_SIZE = (250 * $speed_multiplier).to_i
 MIN_FILES_BATCH_SIZE = 50
 
-# We ignore files recently defragmented for 4 hours
-IGNORE_AFTER_DEFRAG_DELAY = 4 * 3600
+# We ignore files recently defragmented for 12 hours
+IGNORE_AFTER_DEFRAG_DELAY = 12 * 3600
 
 MIN_DELAY_BETWEEN_DEFRAGS = 1.5 / $speed_multiplier
 # How often do we dump a status update
@@ -570,6 +578,126 @@ class FilesState
   TYPES = [ :compressed, :uncompressed ]
   attr_reader :last_queue_overflow_at
 
+  # Track recent events using a compact bitarray indexed by hashes of objects
+  # It isn't thread safe but in the event of a race condition
+  # it can only create minor false recent positive/negative recent test results
+  # This is considered acceptable and may be protected by caller if needed
+  class FuzzyEventTracker
+    # Must be 1, 2, 4 or 8 depending on the precision objective
+    BITS_PER_ENTRY = 2
+    # Should be enough: we don't expect to defragment more than 1/s
+    # there's an hardcoded limit of 24 in position_offset
+    ENTRIES_INDEX_BITS = 17
+    ENTRIES_INDEX_SIZE = (ENTRIES_INDEX_BITS.to_f / 8).ceil
+    MAX_ENTRIES = 2 ** ENTRIES_INDEX_BITS
+    ENTRIES_PER_BYTE = 8 / BITS_PER_ENTRY
+    MAX_ENTRY_VALUE = (2 ** BITS_PER_ENTRY) - 1
+
+    attr_reader :size
+
+    def initialize(serialized_data = nil)
+      @tick_interval = IGNORE_AFTER_DEFRAG_DELAY / ((2 ** BITS_PER_ENTRY) - 1)
+      # Reset recent data if rules changed or invalid serialization format
+      if !serialized_data ||
+         (serialized_data["ttl"] != IGNORE_AFTER_DEFRAG_DELAY) ||
+         (serialized_data["bits_per_entry"] != BITS_PER_ENTRY) ||
+         ((serialized_data["bitarray"].size * ENTRIES_PER_BYTE) != MAX_ENTRIES)
+        error "Invalid serialized data: \n#{serialized_data.inspect}"
+        @bitarray = "\0" * (MAX_ENTRIES / ENTRIES_PER_BYTE)
+        @last_tick = Time.now
+        @size = 0
+        return
+      end
+      @bitarray = serialized_data["bitarray"]
+      @last_tick = serialized_data["last_tick"]
+      @size = serialized_data["size"]
+    end
+
+    # Excpects a string
+    # set value to max in the entry (0 will indicate entry has expired)
+    def event(object_id)
+      advance_clock_when_needed
+      position, offset = position_offset(object_id)
+
+      byte = @bitarray.getbyte(position)
+      puts "#{object_id}: byte at #{position}: #{byte}" if $debug
+      nibbles = []
+      ENTRIES_PER_BYTE.times do
+        nibbles << (byte & MAX_ENTRY_VALUE)
+        byte = (byte >> BITS_PER_ENTRY)
+      end
+      previous_value = nibbles[offset]
+      nibbles[offset] = MAX_ENTRY_VALUE
+      nibbles.reverse.each do |value|
+        byte = (byte << BITS_PER_ENTRY)
+        byte += value
+      end
+      puts "updated byte: #{byte}" if $debug
+      @bitarray.setbyte(position, byte)
+      @size += 1 if previous_value == 0
+    end
+
+    def recent?(object_id)
+      advance_clock_when_needed
+      position, offset = position_offset(object_id)
+      byte = @bitarray.getbyte(position)
+      offset.times { byte = (byte >> BITS_PER_ENTRY) }
+      data = (byte & MAX_ENTRY_VALUE)
+      puts "recent? #{object_id}: #{data}" if $debug
+      data != 0
+    end
+
+    def serialization_data
+      {
+        "bitarray" => @bitarray,
+        "last_tick" => @last_tick,
+        "size" => @size,
+        "ttl" => IGNORE_AFTER_DEFRAG_DELAY,
+        "bits_per_entry" => BITS_PER_ENTRY
+      }
+    end
+
+    private
+
+    def advance_clock_when_needed
+      tick! while (@last_tick + @tick_interval) < Time.now
+    end
+
+    # Rewrite bitarray, decrementing each value and updating size
+    def tick!
+      info "FuzzyEventTracker size was: #{size}" if $verbose
+      @last_tick += @tick_interval
+      return if @size == 0 # nothing to be done
+      @size = 0
+      @bitarray.size.times do |byte_idx|
+        byte = @bitarray.getbyte(byte_idx)
+        next if byte == 0 # should be common
+        nibbles = []
+        ENTRIES_PER_BYTE.times do
+          entry = byte & MAX_ENTRY_VALUE
+          entry = [ entry - 1, 0 ].max
+          nibbles << entry
+          byte = (byte >> BITS_PER_ENTRY)
+        end
+        nibbles.reverse.each do |value|
+          @size += 1 if value > 0
+          byte = (byte << BITS_PER_ENTRY)
+          byte += value
+        end
+        @bitarray.setbyte(byte_idx, byte)
+      end
+      info "FuzzyEventTracker size is: #{size}" if $verbose
+    end
+
+    def position_offset(object_id)
+      # We get the integer value from the first bytes modulo the number of entries
+      event_idx =
+        ("\0" + Digest::MD5.digest(object_id)[0...3]).
+        unpack("N")[0] % MAX_ENTRIES
+      [ event_idx / ENTRIES_PER_BYTE, event_idx % ENTRIES_PER_BYTE ]
+    end
+  end
+
   def initialize(btrfs)
     @btrfs = btrfs
     # Queue of files to defragment, ordered by fragmentation cost
@@ -633,25 +761,21 @@ class FilesState
   end
 
   def recently_defragmented?(shortname)
-    @fragmentation_info_mutex.synchronize {
-      @recently_defragmented[shortname] &&
-      (@recently_defragmented[shortname] >=
-        (Time.now - IGNORE_AFTER_DEFRAG_DELAY))
-    }
+    @fragmentation_info_mutex.synchronize do
+      @recently_defragmented.recent?(shortname)
+    end
   end
 
   def defragmented!(shortname)
-    @fragmentation_info_mutex.synchronize {
-      @recently_defragmented[shortname] = Time.now
+    @fragmentation_info_mutex.synchronize do
+      @recently_defragmented.event(shortname)
       serialize_recently_defragmented if must_serialize_recent?
-    }
+    end
     remove_tracking(shortname)
   end
 
   def remove_tracking(shortname)
-    @writes_mutex.synchronize {
-      @written_files.delete(shortname)
-    }
+    @writes_mutex.synchronize { @written_files.delete(shortname) }
   end
 
   def update_files(file_fragmentations, threshold_multiplier = nil)
@@ -665,7 +789,9 @@ class FilesState
     updated_names = file_fragmentations.map(&:short_filename)
     duplicate_names = []
     # Remove files we won't consider anyway
-    file_fragmentations.reject! { |frag| below_threshold_cost(frag, threshold_multiplier) }
+    file_fragmentations.reject! do |frag|
+      below_threshold_cost(frag, threshold_multiplier)
+    end
     @fragmentation_info_mutex.synchronize {
       # Remove duplicates and compute duplicate names
       TYPES.each { |type|
@@ -683,7 +809,6 @@ class FilesState
       sort_files
       # Remove old entries and fit in max queue length
       cleanup_files
-      cleanup_recent
       # Returns the number of new files queued
       updated_names -= duplicate_names
       # Verify we didn't cleanup some of them
@@ -934,11 +1059,13 @@ class FilesState
   end
   def load_recently_defragmented
     @recently_defragmented =
-      unserialize_entry(@btrfs.dir, RECENT_STORE, "recently defragmented", {})
+      FuzzyEventTracker.new(unserialize_entry(@btrfs.dir, RECENT_STORE,
+                                              "recently defragmented"))
     @last_recent_serialized_at = Time.now
   end
   def serialize_recently_defragmented
-    serialize_entry(@btrfs.dir, @recently_defragmented, RECENT_STORE)
+    serialize_entry(@btrfs.dir, @recently_defragmented.serialization_data,
+                    RECENT_STORE)
     @last_recent_serialized_at = Time.now
   end
 
@@ -973,11 +1100,6 @@ class FilesState
           @file_fragmentations[:uncompressed][start..-1]
       end
     end
-  end
-  def cleanup_recent
-    @recently_defragmented.reject! { |filename, tstamp|
-      (Time.now - tstamp) > IGNORE_AFTER_DEFRAG_DELAY
-    }
   end
   def queue_size(type)
     @file_fragmentations[type].size
@@ -1254,7 +1376,7 @@ class BtrfsDev
     begin
       Find.find(dir) do |path|
         if @next_slow_status_printed_at <= Time.now
-          info "-- #{dir}: #{short_filename(path)}" if $verbose
+          info "-- #{dir}: #{short_filename(path)}" if $debug
           print_slow_status(start, queued, count, already_processed, recent)
         end
         if prune?(path)
