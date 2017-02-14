@@ -665,7 +665,7 @@ class FilesState
 
     # Rewrite bitarray, decrementing each value and updating size
     def tick!
-      info "FuzzyEventTracker size was: #{size}" if $verbose
+      info "FuzzyEventTracker size was: #{size}" if $debug
       @last_tick += @tick_interval
       return if @size == 0 # nothing to be done
       @size = 0
@@ -686,7 +686,7 @@ class FilesState
         end
         @bitarray.setbyte(byte_idx, byte)
       end
-      info "FuzzyEventTracker size is: #{size}" if $verbose
+      info "FuzzyEventTracker size is: #{size}" if $debug
     end
 
     def position_offset(object_id)
