@@ -620,7 +620,6 @@ class FilesState
       position, offset = position_offset(object_id)
 
       byte = @bitarray.getbyte(position)
-      puts "#{object_id}: byte at #{position}: #{byte}" if $debug
       nibbles = []
       ENTRIES_PER_BYTE.times do
         nibbles << (byte & MAX_ENTRY_VALUE)
@@ -632,7 +631,6 @@ class FilesState
         byte = (byte << BITS_PER_ENTRY)
         byte += value
       end
-      puts "updated byte: #{byte}" if $debug
       @bitarray.setbyte(position, byte)
       @size += 1 if previous_value == 0
     end
@@ -643,7 +641,6 @@ class FilesState
       byte = @bitarray.getbyte(position)
       offset.times { byte = (byte >> BITS_PER_ENTRY) }
       data = (byte & MAX_ENTRY_VALUE)
-      puts "recent? #{object_id}: #{data}" if $debug
       data != 0
     end
 
