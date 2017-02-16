@@ -188,7 +188,7 @@ module Outputs
   end
   def error(msg)
     $output_mutex.synchronize {
-      STDERR.puts "#{short_tstamp}: #{msg}"
+      STDERR.puts "#{short_tstamp}: ERROR, #{msg}"
     }
   end
   def info(msg)
