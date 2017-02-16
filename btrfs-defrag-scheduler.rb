@@ -1753,7 +1753,7 @@ def fatrace_file_writes(devs)
   # This is a hack to avoid early restarts:
   # new_fs? waits for devs.update! to finish which can be a bit long
   # as it calls the btrfs command multiple times to parse dev properties
-  sleep 0.5; dev.new_fs?
+  sleep 0.5; devs.new_fs?
   cmd = [ "fatrace", "-f", "W" ]
   extract_write_re = /^[^(]+\([0-9]+\): [ORWC]+ (.*)$/
   loop do
