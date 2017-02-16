@@ -1426,9 +1426,9 @@ class BtrfsDev
       frags = FileFragmentation.batch_init(filelist, self)
       queued += @files_state.update_files(frags)
     end
-    info(("# #{@dirname} %d/%ds: %d queued / %d found, " +
+    info(("# %s %d/%ds: %d queued / %d found, " +
           "%d defragmented recently, %d changed recently, %d low cost") %
-         [ (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
+         [ @dirname, (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
            already_processed, recent,
            count - already_processed - recent - queued ])
     was_guessed = @filecount.nil?
@@ -1446,8 +1446,8 @@ class BtrfsDev
     run_with_device_usage(usage: file_frag.defrag_time) {
       cmd = defrag_cmd + [ file_frag.filename ]
       if $verbose
-        msg = "-- #{dir}: %s (%s:%.2f)" %
-              [ shortname, (file_frag.majority_compressed? ? "C" : "U"),
+        msg = "-- %s: %s (%s:%.2f)" %
+              [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
                 file_frag.fragmentation_cost ]
         info(msg)
       end
@@ -1649,9 +1649,9 @@ class BtrfsDev
   def print_slow_status(start, queued, count, already_processed, recent,
                         stopped = false)
     @next_slow_status_printed_at += SLOW_STATUS_PERIOD
-    msg = ("#{stopped ? '#' : '-'} #{@dirname} %d/%ds: %d queued / %d found, " +
+    msg = ("#{stopped ? '#' : '-'} %s %d/%ds: %d queued / %d found, " +
            "%d defragmented recently, %d changed recently, %d low cost") %
-          [ (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
+          [ @dirname, (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
             already_processed, recent,
             count - already_processed - recent - queued ]
     if @files_state.last_queue_overflow_at &&
