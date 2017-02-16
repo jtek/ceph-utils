@@ -599,7 +599,7 @@ class FilesState
       @tick_interval = IGNORE_AFTER_DEFRAG_DELAY / ((2 ** BITS_PER_ENTRY) - 1)
       # Reset recent data if rules changed or invalid serialization format
       if !serialized_data ||
-         (serialized_data["ttl"] != IGNORE_AFTER_DEFRAG_DELAY) ||
+         (serialized_data["ttl"] > IGNORE_AFTER_DEFRAG_DELAY) ||
          (serialized_data["bits_per_entry"] != BITS_PER_ENTRY) ||
          ((serialized_data["bitarray"].size * ENTRIES_PER_BYTE) != MAX_ENTRIES)
         error "Invalid serialized data: \n#{serialized_data.inspect}"
