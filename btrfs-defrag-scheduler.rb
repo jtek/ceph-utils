@@ -500,6 +500,15 @@ class FileFragmentation
   def compress_type
     @majority_compressed ? :compressed : :uncompressed
   end
+  def human_size
+    suffixes = [ "B", "kiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB" ]
+    prefix = @size.to_f
+    while (prefix > 1024) && (suffixes.size > 1)
+      prefix = prefix / 1024
+      suffixes.shift
+    end
+    "%.3g%s" % [ prefix, suffixes.shift ]
+  end
 
   def update_fragmentation
     unless File.file?(filename)
@@ -1446,9 +1455,9 @@ class BtrfsDev
     run_with_device_usage(usage: file_frag.defrag_time) {
       cmd = defrag_cmd + [ file_frag.filename ]
       if $verbose
-        msg = "-- %s: %s (%s:%.2f)" %
+        msg = "-- %s: %s %s,%s,%.2f" %
               [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
-                file_frag.fragmentation_cost ]
+                file_frag.human_size, file_frag.fragmentation_cost ]
         info(msg)
       end
       system(*cmd)
