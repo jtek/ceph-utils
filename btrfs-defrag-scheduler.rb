@@ -507,7 +507,7 @@ class FileFragmentation
       prefix = prefix / 1024
       suffixes.shift
     end
-    "%.3g%s" % [ prefix, suffixes.shift ]
+    "%.4g%s" % [ prefix, suffixes.shift ]
   end
 
   def update_fragmentation
