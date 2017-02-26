@@ -120,9 +120,7 @@ SPEED_FACTOR_WITH_EMPTY_QUEUE = 0.2
 # time window => max_device_use_ratio
 DEVICE_USE_LIMITS = {
   5 => 0.5 * $speed_multiplier,
-  30 => 0.25 * $speed_multiplier,
-  60 => 0.16 * $speed_multiplier,
-  120 => 0.1 * $speed_multiplier,
+  60 => 0.25 * $speed_multiplier,
 }
 EXPECTED_COMPRESS_RATIO = 0.5
 
