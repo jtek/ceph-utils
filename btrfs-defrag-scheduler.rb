@@ -98,11 +98,12 @@ end
 # to defragment
 COST_HISTORY_SIZE = 2000
 # Tune this to change the effort made to defragment (1.0: max effort)
-MIN_EXPECTED_BENEFIT_RANGE = (1.05..2.0)
+#MIN_EXPECTED_BENEFIT_RANGE = (1.05..2.0)
+MIN_EXPECTED_BENEFIT = 1.05
 # How fast the value of the target_benefit can move (per second)
 # Full range in two hours
-MIN_EXPECTED_BENEFIT_MAX_ACCELERATION =
-  (MIN_EXPECTED_BENEFIT_RANGE.max / MIN_EXPECTED_BENEFIT_RANGE.min) ** (1/7200.0)
+# MIN_EXPECTED_BENEFIT_MAX_ACCELERATION =
+#   (MIN_EXPECTED_BENEFIT_RANGE.max / MIN_EXPECTED_BENEFIT_RANGE.min) ** (1/7200.0)
 # Dangerous, can try to defragment many files that can't be
 # defragmented if set too low
 COST_THRESHOLD_PERCENTILE = 50
@@ -722,11 +723,11 @@ class FilesState
       uncompressed: 1.0,
     }
     @tracker_mutex = Mutex.new
-    @target_benefit = {
-      :compressed => MIN_EXPECTED_BENEFIT_RANGE.min,
-      :uncompressed => MIN_EXPECTED_BENEFIT_RANGE.min,
-    }
-    @last_target_benefits_updated_at = Time.now
+    # @target_benefit = {
+    #   :compressed => MIN_EXPECTED_BENEFIT,
+    #   :uncompressed => MIN_EXPECTED_BENEFIT,
+    # }
+    # @last_target_benefits_updated_at = Time.now
     load_recently_defragmented
     load_history
 
@@ -963,14 +964,14 @@ class FilesState
            "(c/u) queued: %d/%d; " \
            "ini: %.2f/%.2f; " \
            "avg: %.2f/%.2f; " \
-           "fac: %.2f/%.2f; " \
+#           "fac: %.2f/%.2f; " \
            "cur: %.3f/%.3f; " \
            "flw: %d; recent: %d") %
          [ type_share(:compressed) * 100,
            queue_size(:compressed), queue_size(:uncompressed),
            @initial_costs[:compressed], @initial_costs[:uncompressed],
            @average_costs[:compressed], @average_costs[:uncompressed],
-           @target_benefit[:compressed], @target_benefit[:uncompressed],
+#           @target_benefit[:compressed], @target_benefit[:uncompressed],
            current_queue_threshold(:compressed),
            current_queue_threshold(:uncompressed),
            @written_files.size, @recently_defragmented.size ])
@@ -981,7 +982,7 @@ class FilesState
   end
   def compute_thresholds
     return unless thresholds_expired?
-    update_target_benefits
+    #update_target_benefits
     TYPES.each { |key|
       size = @cost_achievement_history[key].size
       # We want a weighted percentile, higher weight for more recent costs
@@ -1007,7 +1008,7 @@ class FilesState
         total_weight += result[2] * weight
       end
       # Percentile reached
-      @cost_thresholds[key] = result[1] * target_benefit(key)
+      @cost_thresholds[key] = result[1] * MIN_EXPECTED_BENEFIT
       # Continue with the rest
       while ordered_history.any?
         result, weight = ordered_history.shift
@@ -1131,33 +1132,33 @@ class FilesState
       @cost_thresholds[:uncompressed]
     end
   end
-  def target_benefit(type)
-    @target_benefit[type]
-  end
-  def update_target_benefits
-    now = Time.now
-    delay = now - @last_target_benefits_updated_at
-    @last_target_benefits_updated_at = now
-    TYPES.each { |t| adjust_target(t, delay) }
-  end
-  def adjust_target(key, delay)
-    diff =
-      # queue size becomes too large punish compressed and/or uncompressed
-      if total_queue_size > (MAX_QUEUE_LENGTH / 2)
-        queue_size(key) - (queue_reserve(key) / 2)
-      else
-        # don't punish anyone, let the queues grow
-        total_queue_size - (MAX_QUEUE_LENGTH / 2)
-      end
-    target_relative_diff = [ 1.0, diff.to_f / (queue_reserve(key) / 2) ].min
-    velocity =
-      MIN_EXPECTED_BENEFIT_MAX_ACCELERATION ** (delay * target_relative_diff)
-    target =
-      @target_benefit[key] * velocity
-    target = [ [ target, MIN_EXPECTED_BENEFIT_RANGE.min ].max,
-               MIN_EXPECTED_BENEFIT_RANGE.max ].min
-    @target_benefit[key] = target
-  end
+  # def target_benefit(type)
+  #   @target_benefit[type]
+  # end
+  # def update_target_benefits
+  #   now = Time.now
+  #   delay = now - @last_target_benefits_updated_at
+  #   @last_target_benefits_updated_at = now
+  #   TYPES.each { |t| adjust_target(t, delay) }
+  # end
+  # def adjust_target(key, delay)
+  #   diff =
+  #     # queue size becomes too large punish compressed and/or uncompressed
+  #     if total_queue_size > (MAX_QUEUE_LENGTH / 2)
+  #       queue_size(key) - (queue_reserve(key) / 2)
+  #     else
+  #       # don't punish anyone, let the queues grow
+  #       total_queue_size - (MAX_QUEUE_LENGTH / 2)
+  #     end
+  #   target_relative_diff = [ 1.0, diff.to_f / (queue_reserve(key) / 2) ].min
+  #   velocity =
+  #     MIN_EXPECTED_BENEFIT_MAX_ACCELERATION ** (delay * target_relative_diff)
+  #   target =
+  #     @target_benefit[key] * velocity
+  #   target = [ [ target, MIN_EXPECTED_BENEFIT_RANGE.min ].max,
+  #              MIN_EXPECTED_BENEFIT_RANGE.max ].min
+  #   @target_benefit[key] = target
+  # end
 end
 
 # Responsible for maintaining information about the filesystem itself
