@@ -1424,7 +1424,7 @@ class BtrfsDev
     update_filecount(processed: 0, total: count)
     wait_before_slow_scan_restart(was_guessed)
   end
-  
+
   def prune?(entry)
     (File.directory?(entry) && (entry != dir) &&
      Pathname.new(entry).mountpoint? && !rw_subvol?(entry)) ||
@@ -1593,7 +1593,7 @@ class BtrfsDev
     if no_defrag_list.any? && (@no_defrag_list != no_defrag_list)
       info "-- #{dir} blacklist: #{no_defrag_list.inspect}"
     end
-    @no_defrag_list = no_defrag_list 
+    @no_defrag_list = no_defrag_list
   end
 
   def blacklisted?(filename)
