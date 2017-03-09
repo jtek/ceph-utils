@@ -1180,50 +1180,6 @@ class BtrfsDev
     @defrag_cmd = nil if changed
   end
 
-  def update_subvol_dirs(dev_fs_map)
-    subvol_dirs_list = BtrfsDev.list_rw_subvolumes(dir)
-    fs_map = {}
-    dev_list = Set.new
-    rw_subvols = Set.new
-    subvol_dirs_list.each do |subvol|
-      full_path = "#{dir}/#{subvol}"
-      rw_subvols << full_path
-      dev_id = File.stat(full_path).dev
-      other_fs = dev_fs_map[dev_id]
-      other_fs.each { |fs| fs_map[fs] = full_path }
-      dev_list << dev_id
-    end
-    dev_list << File.stat(dir).dev
-    if fs_map != @fs_map
-      info "-- #{dir}: changed filesystem maps"
-      info fs_map.inspect
-      @fs_map = fs_map
-    end
-    @dev_list = dev_list
-    @rw_subvols = rw_subvols
-  end
-
-  def load_exceptions
-    no_defrag_list = []
-    exceptions_file = "#{dir}/.no_defrag"
-    if File.readable?(exceptions_file)
-      no_defrag_list =
-        File.read(exceptions_file).split("\n").map { |path| "#{dir}/#{path}" }
-    end
-    if no_defrag_list.any? && (@no_defrag_list != no_defrag_list)
-      info "-- #{dir} blacklist: #{no_defrag_list.inspect}"
-    end
-    @no_defrag_list = no_defrag_list 
-  end
-
-  def blacklisted?(filename)
-    @no_defrag_list.any? { |blacklist| filename.index(blacklist) == 0 }
-  end
-
-  def rw_subvol?(dir)
-    @rw_subvols.include?(dir)
-  end
-
   def stop_processing
     [ @slow_scan_thread, @stat_thread, @defrag_thread ].each do |thread|
       Thread.kill(thread) if thread
@@ -1232,18 +1188,6 @@ class BtrfsDev
 
   def has_dev?(dev_id)
     @dev_list.include?(dev_id)
-  end
-
-  def prune?(entry)
-    (File.directory?(entry) && (entry != dir) &&
-     Pathname.new(entry).mountpoint? && !rw_subvol?(entry)) ||
-      blacklisted?(entry)
-  rescue
-    # Pathname#mountpoint can't process some entries
-    false
-  end
-  def skip_defrag?(filename)
-    filename.end_with?(" (deleted)") || blacklisted?(filename)
   end
 
   # Manage queue of asynchronously defragmented files
@@ -1303,6 +1247,92 @@ class BtrfsDev
     filename.gsub(subvol_fs, @fs_map[subvol_fs])
   end
 
+  def defrag!
+    file_frag = get_next_file_to_defrag
+    return unless file_frag
+    shortname = file_frag.short_filename
+
+    # We declare it defragmented ASAP to avoid a double queue
+    @files_state.defragmented!(shortname)
+    run_with_device_usage(usage: file_frag.defrag_time) {
+      cmd = defrag_cmd + [ file_frag.filename ]
+      if $verbose
+        msg = "-- %s: %s %s,%s,%.2f" %
+              [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
+                file_frag.human_size, file_frag.fragmentation_cost ]
+        info(msg)
+      end
+      system(*cmd)
+    }
+    # Clear up any writes detected concurrently
+    @files_state.remove_tracking(shortname)
+    stat_queue(file_frag)
+  end
+
+  # recursively search for the next file to defrag
+  def get_next_file_to_defrag
+    return nil unless @files_state.any_interesting_file? && available_for_defrag?
+    file_frag = @files_state.pop_most_interesting
+    shortname = file_frag.short_filename
+    # Check that file still exists
+    unless file_frag && File.file?(file_frag.filename)
+      @files_state.remove_tracking(shortname)
+      return get_next_file_to_defrag
+    end
+    file_frag.update_fragmentation
+    # Skip files that are already below target and reset tracking
+    # to avoid future work if there aren't any more writes
+    if @files_state.below_threshold_cost(file_frag)
+      @files_state.remove_tracking(shortname)
+      return get_next_file_to_defrag
+    end
+
+    if @files_state.recently_defragmented?(shortname)
+      @files_state.remove_tracking(shortname)
+      return get_next_file_to_defrag
+    end
+
+    file_frag
+  end
+
+  def available_for_defrag?
+    @checker.available?(@files_state.queue_fill_proportion,
+                        @files_state.next_defrag_duration)
+  end
+
+  # Only recompress if we are already compressing data
+  def defrag_cmd
+    return @defrag_cmd if @defrag_cmd
+    cmd =
+      if @compressed
+        [ "btrfs", "filesystem", "defragment", "-czlib" ]
+      else
+        [ "btrfs", "filesystem", "defragment" ]
+      end
+    if $default_extent_size
+      cmd += [ "-t", $default_extent_size ]
+    end
+    @defrag_cmd = cmd
+  end
+
+  # We prefer to store short filenames to free memory
+  def short_filename(filename)
+    filename.gsub("#{dir}/", "")
+  end
+  def full_filename(short_filename)
+    "#{dir}/#{short_filename}"
+  end
+  def file_id(short_filename)
+    "#{@dirname}: #{short_filename}"
+  end
+  def average_cost(type)
+    @files_state.average_cost(type)
+  end
+  def track_compress_type(compress_types)
+    @files_state.type_track(compress_types)
+  end
+
+  private
   # Slowly update files, targeting a SLOW_SCAN_PERIOD period for all updates
   def slow_files_state_update(first_pass: false)
     if first_pass && @last_processed > 0
@@ -1395,92 +1425,19 @@ class BtrfsDev
     wait_before_slow_scan_restart(was_guessed)
   end
   
-  def defrag!
-    file_frag = get_next_file_to_defrag
-    return unless file_frag
-    shortname = file_frag.short_filename
-
-    # We declare it defragmented ASAP to avoid a double queue
-    @files_state.defragmented!(shortname)
-    run_with_device_usage(usage: file_frag.defrag_time) {
-      cmd = defrag_cmd + [ file_frag.filename ]
-      if $verbose
-        msg = "-- %s: %s %s,%s,%.2f" %
-              [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
-                file_frag.human_size, file_frag.fragmentation_cost ]
-        info(msg)
-      end
-      system(*cmd)
-    }
-    # Clear up any writes detected concurrently
-    @files_state.remove_tracking(shortname)
-    stat_queue(file_frag)
+  def prune?(entry)
+    (File.directory?(entry) && (entry != dir) &&
+     Pathname.new(entry).mountpoint? && !rw_subvol?(entry)) ||
+      blacklisted?(entry)
+  rescue
+    # Pathname#mountpoint can't process some entries
+    false
   end
 
-  # recursively search for the next file to defrag
-  def get_next_file_to_defrag
-    return nil unless @files_state.any_interesting_file? && available_for_defrag?
-    file_frag = @files_state.pop_most_interesting
-    shortname = file_frag.short_filename
-    # Check that file still exists
-    unless file_frag && File.file?(file_frag.filename)
-      @files_state.remove_tracking(shortname)
-      return get_next_file_to_defrag
-    end
-    file_frag.update_fragmentation
-    # Skip files that are already below target and reset tracking
-    # to avoid future work if there aren't any more writes
-    if @files_state.below_threshold_cost(file_frag)
-      @files_state.remove_tracking(shortname)
-      return get_next_file_to_defrag
-    end
-
-    if @files_state.recently_defragmented?(shortname)
-      @files_state.remove_tracking(shortname)
-      return get_next_file_to_defrag
-    end
-
-    file_frag
+  def skip_defrag?(filename)
+    filename.end_with?(" (deleted)") || blacklisted?(filename)
   end
 
-  def available_for_defrag?
-    @checker.available?(@files_state.queue_fill_proportion,
-                        @files_state.next_defrag_duration)
-  end
-
-  # Only recompress if we are already compressing data
-  def defrag_cmd
-    return @defrag_cmd if @defrag_cmd
-    cmd =
-      if @compressed
-        [ "btrfs", "filesystem", "defragment", "-czlib" ]
-      else
-        [ "btrfs", "filesystem", "defragment" ]
-      end
-    if $default_extent_size
-      cmd += [ "-t", $default_extent_size ]
-    end
-    @defrag_cmd = cmd
-  end
-
-  # We prefer to store short filenames to free memory
-  def short_filename(filename)
-    filename.gsub("#{dir}/", "")
-  end
-  def full_filename(short_filename)
-    "#{dir}/#{short_filename}"
-  end
-  def file_id(short_filename)
-    "#{@dirname}: #{short_filename}"
-  end
-  def average_cost(type)
-    @files_state.average_cost(type)
-  end
-  def track_compress_type(compress_types)
-    @files_state.type_track(compress_types)
-  end
-
-  private
   def run_with_device_usage(usage: nil)
     start = Time.now
     result = yield
@@ -1624,6 +1581,50 @@ class BtrfsDev
       (MAX_DELAY_BETWEEN_DEFRAGS - MIN_DELAY_BETWEEN_DEFRAGS)
     [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
       MIN_DELAY_BETWEEN_DEFRAGS ].max
+  end
+
+  def load_exceptions
+    no_defrag_list = []
+    exceptions_file = "#{dir}/.no_defrag"
+    if File.readable?(exceptions_file)
+      no_defrag_list =
+        File.read(exceptions_file).split("\n").map { |path| "#{dir}/#{path}" }
+    end
+    if no_defrag_list.any? && (@no_defrag_list != no_defrag_list)
+      info "-- #{dir} blacklist: #{no_defrag_list.inspect}"
+    end
+    @no_defrag_list = no_defrag_list 
+  end
+
+  def blacklisted?(filename)
+    @no_defrag_list.any? { |blacklist| filename.index(blacklist) == 0 }
+  end
+
+  def rw_subvol?(dir)
+    @rw_subvols.include?(dir)
+  end
+
+  def update_subvol_dirs(dev_fs_map)
+    subvol_dirs_list = BtrfsDev.list_rw_subvolumes(dir)
+    fs_map = {}
+    dev_list = Set.new
+    rw_subvols = Set.new
+    subvol_dirs_list.each do |subvol|
+      full_path = "#{dir}/#{subvol}"
+      rw_subvols << full_path
+      dev_id = File.stat(full_path).dev
+      other_fs = dev_fs_map[dev_id]
+      other_fs.each { |fs| fs_map[fs] = full_path }
+      dev_list << dev_id
+    end
+    dev_list << File.stat(dir).dev
+    if fs_map != @fs_map
+      info "-- #{dir}: changed filesystem maps"
+      info fs_map.inspect
+      @fs_map = fs_map
+    end
+    @dev_list = dev_list
+    @rw_subvols = rw_subvols
   end
 
   class << self
