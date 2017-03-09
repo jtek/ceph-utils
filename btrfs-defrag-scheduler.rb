@@ -1490,16 +1490,12 @@ class BtrfsDev
     start = Time.now
     result = yield
     duration = Time.now - start
-    if usage
+    if usage && (duration > usage)
       # We have an estimation of the total usage cost
       # but it might be under-evaluated so we use actual time spent
       # (which doesn't count asynchronous disk usage) as a safeguard
-      if duration > (2 * usage)
-        usage *= 2
-      elsif duration > usage
-        usage = duration
-      end
-      @checker.add_usage(start, usage)
+      adjusted_duration = [ duration, usage * 2 ].min
+      @checker.add_usage(start, adjusted_duration)
     else
       @checker.add_usage(start, duration)
     end
