@@ -106,8 +106,8 @@ COST_COMPUTE_DELAY = 60
 HISTORY_SERIALIZE_DELAY = 3600
 RECENT_SERIALIZE_DELAY = 120
 
-# How many files do we queue for defragmentation (limits amount of memory used)
-MAX_QUEUE_LENGTH = 400
+# How many files do we queue for defragmentation
+MAX_QUEUE_LENGTH = 2000
 # How much do we slow defragmentation frequency when the queue is empty
 SPEED_FACTOR_WITH_EMPTY_QUEUE = 0.2
 # How much device time the program is allowed to use
