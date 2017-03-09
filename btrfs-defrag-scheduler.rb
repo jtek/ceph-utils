@@ -148,7 +148,9 @@ MIN_FILES_BATCH_SIZE = 50
 # We ignore files recently defragmented for 12 hours
 IGNORE_AFTER_DEFRAG_DELAY = 12 * 3600
 
-MIN_DELAY_BETWEEN_DEFRAGS = 1.5 / $speed_multiplier
+MIN_DELAY_BETWEEN_DEFRAGS = 0.1
+MAX_DELAY_BETWEEN_DEFRAGS = 10
+
 # How often do we dump a status update
 STATUS_PERIOD = 120 # every 2 minutes
 SLOW_STATUS_PERIOD = 900
@@ -1148,7 +1150,7 @@ class BtrfsDev
     @defrag_thread = Thread.new {
       loop do
         defrag!
-        sleep MIN_DELAY_BETWEEN_DEFRAGS
+        sleep delay_between_defrags
       end
     }
   end
@@ -1612,6 +1614,16 @@ class BtrfsDev
       msg += " ovf: #{(Time.now - @files_state.last_queue_overflow_at).to_i}s ago"
     end
     info msg
+  end
+
+  # Don't loop on defrag aggressively if there isn't much to be done
+  def delay_between_defrags
+    # 100 factor: At 1% queue fill (currently 20 files) we use the max speed
+    proportional_delay =
+      @files_state.queue_fill_proportion * 100 *
+      (MAX_DELAY_BETWEEN_DEFRAGS - MIN_DELAY_BETWEEN_DEFRAGS)
+    [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
+      MIN_DELAY_BETWEEN_DEFRAGS ].max
   end
 
   class << self
