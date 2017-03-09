@@ -775,12 +775,6 @@ class FilesState
 
   def update_files(file_fragmentations, threshold_multiplier = nil)
     return 0 unless file_fragmentations.any?
-    # Filter files we are currently tracking
-    #@writes_mutex.synchronize {
-    #  file_fragmentations.reject! { |frag|
-    #    @written_files.include?(frag.short_filename)
-    #  }
-    #}
     updated_names = file_fragmentations.map(&:short_filename)
     duplicate_names = []
     # Remove files we won't consider anyway
@@ -1119,7 +1113,7 @@ end
 # Responsible for maintaining information about the filesystem itself
 # and background threads
 class BtrfsDev
-  attr_reader :dir, :dirname
+  attr_reader :dir, :dirname, :commit_delay
   include FragmentationCost
   include Outputs
   include HashEntrySerializer
@@ -1238,7 +1232,6 @@ class BtrfsDev
     @dev_list.include?(dev_id)
   end
 
-  def commit_delay; @commit_delay end
   def prune?(entry)
     (File.directory?(entry) && (entry != dir) &&
      Pathname.new(entry).mountpoint? && !rw_subvol?(entry)) ||
