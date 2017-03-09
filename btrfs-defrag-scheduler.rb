@@ -266,9 +266,7 @@ class UsagePolicyChecker
       @device_uses.shift
     end
     # Count usage in each time window
-    usage_sums = Hash[ DEVICE_USE_LIMITS.keys.map { |window|
-                         [ window, 0 ]
-                       } ]
+    usage_sums = Hash[ DEVICE_USE_LIMITS.keys.map { |window|  [ window, 0 ] } ]
     # This is non-optimal but it should involve a very small amount of data
     @device_uses.each { |start,duration|
       stop = start + duration
