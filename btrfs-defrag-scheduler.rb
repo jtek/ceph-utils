@@ -115,7 +115,7 @@ SPEED_FACTOR_WITH_EMPTY_QUEUE = 0.2
 # time window => max_device_use_ratio
 DEVICE_USE_LIMITS = {
   5 => 0.5 * $speed_multiplier,
-  60 => 0.25 * $speed_multiplier,
+  30 => 0.25 * $speed_multiplier,
 }
 EXPECTED_COMPRESS_RATIO = 0.5
 
@@ -246,49 +246,110 @@ class UsagePolicyChecker
     @device_uses = []
   end
 
-  def add_usage(start, duration)
-    @device_uses << [ start, duration ]
+  def add_usage(start, stop)
+    @device_uses << [ start, stop ]
   end
 
   # If expected_time is passed, this tries to remain below the thresholds
   # until there isn't any tracked device_use left
   def available?(queue_fill_proportion, expected_time = 0)
+    cleanup
+
     # We slow down defragmentation when there isn't much work
     # and speed it up when there is more work
-    use_factor =
-      SPEED_FACTOR_WITH_EMPTY_QUEUE + queue_fill_proportion *
-      (1 - SPEED_FACTOR_WITH_EMPTY_QUEUE)
-    largest_window = DEVICE_USE_LIMITS.keys.max
-    this_start = Time.now
-    # Cleanup the device uses
-    while (first = @device_uses.first) &&
-        (first[0] + first[1]) < (this_start - largest_window)
-      @device_uses.shift
-    end
+    use_factor = usage_factor(queue_fill_proportion)
+
     # Count usage in each time window
     usage_sums = Hash[ DEVICE_USE_LIMITS.keys.map { |window|  [ window, 0 ] } ]
     # This is non-optimal but it should involve a very small amount of data
-    @device_uses.each { |start,duration|
-      stop = start + duration
-      DEVICE_USE_LIMITS.each { |window, percent|
+    @device_uses.each do |start, stop|
+      duration = stop - start
+      DEVICE_USE_LIMITS.each do |window, percent|
         window_start = this_start + expected_time - window
         # Count only overlapping time windows
         if stop > window_start
           if start > window_start
             usage_sums[window] += duration
           else
-            usage_sums[window] = stop - window_start
+            usage_sums[window] += (stop - window_start)
           end
         end
         if ((usage_sums[window] + expected_time) / use_factor) >
             (window * DEVICE_USE_LIMITS[window])
           return false
         end
-      }
-    }
-    return true
+      end
+    end
+    true
   end
 
+  def available_at(queue_fill_proportion, expected_time = 0)
+    cleanup
+    use_factor = usage_factor(queue_fill_proportion)
+    DEVICE_USE_LIMITS.keys.map do |window|
+      next_available_for(window, use_factor, expected_time)
+    end.max
+  end
+
+  private
+
+  def usage_factor(queue_fill_proportion)
+    SPEED_FACTOR_WITH_EMPTY_QUEUE + queue_fill_proportion *
+                                    (1 - SPEED_FACTOR_WITH_EMPTY_QUEUE)
+  end
+
+  def cleanup
+    largest_window = DEVICE_USE_LIMITS.keys.max
+    this_start = Time.now
+    # Cleanup the device uses
+    @device_uses.shift while (first = @device_uses.first) &&
+                             first[1] < (this_start - largest_window)
+  end
+
+  def next_available_for(window, use_factor, expected_time)
+    target = DEVICE_USE_LIMITS[window] * use_factor
+    now = Time.now
+    # When will it reach the target use_ratio ?
+    return now + dichotomy((0..window), target, 0.001) do |wait|
+      use_ratio(now + wait - window, window, expected_time)
+    end
+  end
+
+  # Return ratio without and with expected_time of next task
+  def use_ratio(start, duration, expected_time)
+    time_spent = 0
+    @device_uses.each do |use_start, use_stop|
+      next if use_stop < start
+      our_start = [ use_start, start ].max
+      time_spent += (use_stop - our_start)
+    end
+    # We don't consider expected_time if there's no device_use
+    return 0 if time_spent == 0
+    # Anything else and we return a normal ratio
+    max_time = [ start + duration - Time.now, expected_time ].min
+    (time_spent + max_time) / duration
+  end
+
+  # Assumes passed block is a monotonic decreasing function
+  # precision is used to limit the effort made to find the best value
+  def dichotomy(range, target, precision)
+    max_deviation = 1 + precision
+    min = range.min; max = range.max
+    val_min = yield(min); val_max = yield(max)
+    return max if val_max > target
+    return min if val_min < target
+    while (max / min) > max_deviation && (val_min / val_max) > max_deviation
+      middle = (min + max) / 2
+      val_middle = yield(middle)
+      if val_middle > target
+        min = middle; val_min = val_middle
+      else
+        max = middle; val_max = val_middle
+      end
+    end
+    # We return the max to avoid any wait on available?
+    max
+  end
 end
 
 # Model for impact on fragmentation performance
@@ -1148,7 +1209,7 @@ class BtrfsDev
     @defrag_thread = Thread.new {
       loop do
         defrag!
-        sleep delay_between_defrags
+        sleep [ delay_between_defrags, delay_until_available_for_defrag ].max
       end
     }
   end
@@ -1252,7 +1313,7 @@ class BtrfsDev
 
     # We declare it defragmented ASAP to avoid a double queue
     @files_state.defragmented!(shortname)
-    run_with_device_usage(usage: file_frag.defrag_time) {
+    run_with_device_usage {
       cmd = defrag_cmd + [ file_frag.filename ]
       if $verbose
         msg = "-- %s: %s %s,%s,%.2f" %
@@ -1269,7 +1330,7 @@ class BtrfsDev
 
   # recursively search for the next file to defrag
   def get_next_file_to_defrag
-    return nil unless @files_state.any_interesting_file? && available_for_defrag?
+    return nil unless @files_state.any_interesting_file? # && available_for_defrag?
     file_frag = @files_state.pop_most_interesting
     shortname = file_frag.short_filename
     # Check that file still exists
@@ -1436,19 +1497,10 @@ class BtrfsDev
     filename.end_with?(" (deleted)") || blacklisted?(filename)
   end
 
-  def run_with_device_usage(usage: nil)
+  def run_with_device_usage
     start = Time.now
     result = yield
-    duration = Time.now - start
-    if usage && (duration > usage)
-      # We have an estimation of the total usage cost
-      # but it might be under-evaluated so we use actual time spent
-      # (which doesn't count asynchronous disk usage) as a safeguard
-      adjusted_duration = [ duration, usage * 2 ].min
-      @checker.add_usage(start, adjusted_duration)
-    else
-      @checker.add_usage(start, duration)
-    end
+    @checker.add_usage(start, Time.now)
     return result
   end
 
@@ -1579,6 +1631,11 @@ class BtrfsDev
       (MAX_DELAY_BETWEEN_DEFRAGS - MIN_DELAY_BETWEEN_DEFRAGS)
     [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
       MIN_DELAY_BETWEEN_DEFRAGS ].max
+  end
+
+  def delay_until_available_for_defrag
+    @checker.available_at(@files_state.queue_fill_proportion,
+                          @files_state.next_defrag_duration) - Time.now
   end
 
   def load_exceptions
