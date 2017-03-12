@@ -1534,14 +1534,14 @@ class BtrfsDev
                   true
                 else
                   (processed < @last_processed) ||
-                    ((processed.to_f - @last_processed) / filecount) > 0.01
+                    ((processed.to_f - @last_processed) / filecount) > 0.001
                 end
     return unless do_update
     @filecount = total
     @last_processed = processed
     entry = { processed: processed, total: total }
     serialize_entry(@dir, entry, FILE_COUNT_STORE)
-    info "# #{@dirname}, #{entry.inspect}" if total
+    info "# #{@dirname}, #{entry.inspect}" if total && $debug
   end
 
   def load_filecount
