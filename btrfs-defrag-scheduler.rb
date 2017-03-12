@@ -283,11 +283,11 @@ class UsagePolicyChecker
     true
   end
 
-  def available_at(queue_fill_proportion, expected_time = 0)
+  def available_at(queue_fill_proportion, expected_time = 0, min_delay = 0)
     cleanup
     use_factor = usage_factor(queue_fill_proportion)
     DEVICE_USE_LIMITS.keys.map do |window|
-      next_available_for(window, use_factor, expected_time)
+      next_available_for(window, use_factor, expected_time, min_delay)
     end.max
   end
 
@@ -306,11 +306,12 @@ class UsagePolicyChecker
                              first[1] < (this_start - largest_window)
   end
 
-  def next_available_for(window, use_factor, expected_time)
-    target = DEVICE_USE_LIMITS[window] * use_factor
+  def next_available_for(window, use_factor, expected_time, min_delay)
     now = Time.now
+    return now + min_delay if window <= min_delay
+    target = DEVICE_USE_LIMITS[window] * use_factor
     # When will it reach the target use_ratio ?
-    return now + dichotomy((0..window), target, 0.001) do |wait|
+    return now + dichotomy((min_delay..window), target, 0.001) do |wait|
       use_ratio(now + wait - window, window, expected_time)
     end
   end
@@ -1207,7 +1208,8 @@ class BtrfsDev
     @defrag_thread = Thread.new {
       loop do
         defrag!
-        sleep [ delay_between_defrags, delay_until_available_for_defrag ].max
+        min_delay = delay_between_defrags
+        sleep delay_until_available_for_defrag(min_delay)
       end
     }
   end
@@ -1629,9 +1631,10 @@ class BtrfsDev
       MIN_DELAY_BETWEEN_DEFRAGS ].max
   end
 
-  def delay_until_available_for_defrag
+  def delay_until_available_for_defrag(min_delay)
     @checker.available_at(@files_state.queue_fill_proportion,
-                          @files_state.next_defrag_duration) - Time.now
+                          @files_state.next_defrag_duration,
+                          min_delay) - Time.now
   end
 
   def load_exceptions
