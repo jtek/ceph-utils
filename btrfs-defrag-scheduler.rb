@@ -333,21 +333,23 @@ class UsagePolicyChecker
   # Assumes passed block is a monotonic decreasing function
   # precision is used to limit the effort made to find the best value
   def dichotomy(range, target, precision)
-    max_deviation = 1 + precision
-    min = range.min; max = range.max
-    val_min = yield(min); val_max = yield(max)
-    return max if val_max > target
-    return min if val_min < target
-    while (max / min) > max_deviation && (val_min / val_max) > max_deviation
+    start = Time.now
+    min = range.min.to_f; max = range.max.to_f
+    return min if yield(min) < target
+    return max if yield(max) > target
+    steps = 0
+    while (max - min) > precision
+      steps += 1
       middle = (min + max) / 2
-      val_middle = yield(middle)
-      if val_middle > target
-        min = middle; val_min = val_middle
+      if yield(middle) > target
+        min = middle
       else
-        max = middle; val_max = val_middle
+        max = middle
       end
     end
     # We return the max to avoid any wait on available?
+    info "dichotomy: %d steps, %.2fs, result: %.2fs" %
+         [ steps, (Time.now - start), max ] if $debug
     max
   end
 end
