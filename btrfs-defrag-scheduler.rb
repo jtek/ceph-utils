@@ -1361,17 +1361,12 @@ class BtrfsDev
   end
 
   # Only recompress if we are already compressing data
+  # use -f to flush data (should allow more accurate disk usage stats)
   def defrag_cmd
     return @defrag_cmd if @defrag_cmd
     cmd =
-      if @compressed
-        [ "btrfs", "filesystem", "defragment", "-czlib" ]
-      else
-        [ "btrfs", "filesystem", "defragment" ]
-      end
-    if $default_extent_size
-      cmd += [ "-t", $default_extent_size ]
-    end
+      [ "btrfs", "filesystem", "defragment", "-t", $default_extent_size, "-f" ]
+    cmd << "-czlib" if @compressed
     @defrag_cmd = cmd
   end
 
