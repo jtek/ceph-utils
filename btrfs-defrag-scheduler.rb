@@ -803,7 +803,8 @@ class FilesState
 
   def next_defrag_duration
     @fragmentation_info_mutex.synchronize {
-      @file_fragmentations[next_available_type].last.defrag_time
+      last_filefrag = @file_fragmentations[next_available_type].last
+      last_filefrag ? last_filefrag.defrag_time : 0
     }
   end
 
