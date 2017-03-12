@@ -783,7 +783,7 @@ class FilesState
     @written_files = {}
     @writes_mutex = Mutex.new
     @last_writes_consolidated_at = Time.now
-    @next_status_printed_at = Time.now
+    @next_status_at = Time.now
   end
 
   def any_interesting_file?
@@ -871,15 +871,9 @@ class FilesState
   end
 
   def file_written_to(filename)
+    status
     shortname = @btrfs.short_filename(filename)
     return if recently_defragmented?(shortname)
-    interval = Time.now - @next_status_printed_at
-    if interval > 0
-      status
-      # keep up if we stopped printing status for a while
-      @next_status_printed_at +=
-        (STATUS_PERIOD + (STATUS_PERIOD * (interval / STATUS_PERIOD)))
-    end
     @writes_mutex.synchronize {
       if @written_files[shortname]
         @written_files[shortname].write!
@@ -1003,6 +997,7 @@ class FilesState
   end
 
   def status
+    return if @next_status_at > Time.now
     info(("# #{@btrfs.dirname} c: %.1f%%; " \
            "(c/u) queued: %d/%d; " \
            "ini: %.2f/%.2f; " \
@@ -1016,6 +1011,7 @@ class FilesState
            current_queue_threshold(:compressed),
            current_queue_threshold(:uncompressed),
            @written_files.size, @recently_defragmented.size ])
+    @next_status_at += STATUS_PERIOD while Time.now > @next_status_at
   end
 
   def thresholds_expired?
@@ -1412,7 +1408,7 @@ class BtrfsDev
         1
       end
     @slow_scan_stop_time = start + duration_factor * SLOW_SCAN_PERIOD
-    @next_slow_status_printed_at ||= Time.now
+    @next_slow_status_at ||= Time.now
     # Target a batch size for MIN_DELAY_BETWEEN_FILEFRAGS interval between
     # filefrag calls
     @slow_batch_size =
@@ -1420,10 +1416,7 @@ class BtrfsDev
         MIN_FILES_BATCH_SIZE ].max
     begin
       Find.find(dir) do |path|
-        if @next_slow_status_printed_at <= Time.now
-          info "-- #{dir}: #{short_filename(path)}" if $debug
-          print_slow_status(start, queued, count, already_processed, recent)
-        end
+        slow_status(start, queued, count, already_processed, recent)
         if prune?(path)
           Find.prune
         else
@@ -1608,9 +1601,10 @@ class BtrfsDev
            end)
   end
 
-  def print_slow_status(start, queued, count, already_processed, recent,
+  def slow_status(start, queued, count, already_processed, recent,
                         stopped = false)
-    @next_slow_status_printed_at += SLOW_STATUS_PERIOD
+    return if @next_slow_status_at > Time.now
+    @next_slow_status_at += SLOW_STATUS_PERIOD
     msg = ("#{stopped ? '#' : '-'} %s %d/%ds: %d queued / %d found, " +
            "%d defragmented recently, %d changed recently, %d low cost") %
           [ @dirname, (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
