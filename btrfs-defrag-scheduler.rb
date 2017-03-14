@@ -659,6 +659,10 @@ class FilesState
     MAX_ENTRIES = 2 ** ENTRIES_INDEX_BITS
     ENTRIES_PER_BYTE = 8 / BITS_PER_ENTRY
     MAX_ENTRY_VALUE = (2 ** BITS_PER_ENTRY) - 1
+    # How often a file is changing its hash data source to avoid colliding
+    # with the same other files
+    ROTATING_PERIOD = 7 * 24 * 3600 # one week
+    ROTATE_SEGMENT = ROTATING_PERIOD.to_f / (2 ** 16)
 
     attr_reader :size
 
@@ -753,10 +757,18 @@ class FilesState
       info "FuzzyEventTracker size is: #{size}" if $debug
     end
 
+    # The actual position slowly changes
     def position_offset(object_id)
-      # We get the integer value from the first bytes modulo the number of entries
+      object_digest = Digest::MD5.digest(object_id)
+      # This gives us a 0-65535 range
+      rotating_offset = object_id[0..1].unpack('n')[0]
+      rotation = ((Time.now.to_i + (rotating_offset * ROTATE_SEGMENT)) /
+                  ROTATING_PERIOD).to_i
+      # 16 (digest size) - 3 (bytes used)
+      digest_offset = rotation % 13
+      # We get the postion from 3 bytes (24 bits)
       event_idx =
-        ("\0" + Digest::MD5.digest(object_id)[0...3]).
+        ("\0" + Digest::MD5.digest(object_id)[digest_offset, 3]).
         unpack("N")[0] % MAX_ENTRIES
       [ event_idx / ENTRIES_PER_BYTE, event_idx % ENTRIES_PER_BYTE ]
     end
