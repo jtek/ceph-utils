@@ -1619,9 +1619,9 @@ class BtrfsDev
 
   # Don't loop on defrag aggressively if there isn't much to be done
   def delay_between_defrags
-    # 100 factor: At 1% queue fill (currently 20 files) we use the max speed
+    # 25 factor: At 4% queue fill (currently 80 files) we use the max speed
     proportional_delay =
-      @files_state.queue_fill_proportion * 100 *
+      @files_state.queue_fill_proportion * 25 *
       (MAX_DELAY_BETWEEN_DEFRAGS - MIN_DELAY_BETWEEN_DEFRAGS)
     [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
       MIN_DELAY_BETWEEN_DEFRAGS ].max
