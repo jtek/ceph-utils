@@ -1640,9 +1640,10 @@ class BtrfsDev
   end
 
   def delay_until_available_for_defrag(min_delay)
-    @checker.available_at(@files_state.queue_fill_proportion,
-                          @files_state.next_defrag_duration,
-                          min_delay) - Time.now
+    [ @checker.available_at(@files_state.queue_fill_proportion,
+                            @files_state.next_defrag_duration,
+                            min_delay) - Time.now,
+      0 ].max
   end
 
   def load_exceptions
