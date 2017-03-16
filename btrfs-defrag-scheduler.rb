@@ -29,7 +29,7 @@ Recognised options:
     prints internal processes information
 
 --speed-multiplier <value> (-m)
-    slows (<1.0) or speeds (>1.0) the defragmentation process (1.0)
+    slows down (<1.0) or speeds up (>1.0) the defragmentation process (1.0)
 
 --slow-start <value> (-l)
     wait for <value> seconds before scanning (600)
@@ -1435,17 +1435,21 @@ class BtrfsDev
           # ignore files with unparsable names
           short_name = short_filename(path) rescue ""
           next if short_name == ""
-          # Don't count as a file
+          # Only process file entries
           next if File.exists?(path) && !File.file?(path)
           count += 1
-          # Ignore recently processed files
+          # Don't process during a resume
           next if first_pass && (count < @last_processed)
+          # Ignore recently processed files
           if @files_state.recently_defragmented?(short_name)
             already_processed += 1
             next
           end
           stat = File.stat(path) rescue nil
+          # If we can't stat a file it's not processable
           next unless stat
+          # Don't try to process a recently modified file
+          # its layout isn't available until next Btrfs commit
           last_modification =
             [ stat.mtime, stat.ctime ].max
           if last_modification > (Time.now - (commit_delay + 5))
