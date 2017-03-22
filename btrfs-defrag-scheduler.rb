@@ -208,6 +208,8 @@ Thread.abort_on_exception = true
 
 # Shared code for classes needing a storage
 # note: write isn't safe, so we protect reads with rescue
+# Idea: centralize writes from all writers and optionnaly wait to commit
+# instead of commiting for every write
 module HashEntrySerializer
   def serialize_entry(key, value, file)
     FileUtils.mkdir_p(File.dirname(file))
@@ -652,7 +654,7 @@ class FilesState
   class FuzzyEventTracker
     # Must be 1, 2, 4 or 8 depending on the precision objective
     # higher value can avoid temporary high spikes of queued files
-    BITS_PER_ENTRY = 4
+    BITS_PER_ENTRY = 8
     # Should be enough: we don't expect to defragment more than 1/s
     # there's an hardcoded limit of 24 in position_offset
     ENTRIES_INDEX_BITS = 18
@@ -673,7 +675,8 @@ class FilesState
          (serialized_data["ttl"] > IGNORE_AFTER_DEFRAG_DELAY) ||
          (serialized_data["bits_per_entry"] != BITS_PER_ENTRY) ||
          ((serialized_data["bitarray"].size * ENTRIES_PER_BYTE) != MAX_ENTRIES)
-        error "Invalid serialized data: \n#{serialized_data.inspect}"
+        dump = serialized_data.reject{|k,v| k == "bitarray"}
+        error "Invalid serialized data: \n#{dump.inspect}"
         @bitarray = "\0" * (MAX_ENTRIES / ENTRIES_PER_BYTE)
         @last_tick = Time.now
         @size = 0
@@ -684,7 +687,7 @@ class FilesState
       @size = serialized_data["size"]
     end
 
-    # Excpects a string
+    # Expects a string
     # set value to max in the entry (0 will indicate entry has expired)
     def event(object_id)
       advance_clock_when_needed
@@ -760,16 +763,17 @@ class FilesState
     # The actual position slowly changes
     def position_offset(object_id)
       object_digest = Digest::MD5.digest(object_id)
+      verylong_int =
+        object_digest.unpack('N*').
+        each_with_index.map { |a, i| a * (2**32)**i }.inject(&:+)
       # This gives us a 0-65535 range
-      rotating_offset = object_id[0..1].unpack('n')[0]
+      rotating_offset = verylong_int & 65535
       rotation = ((Time.now.to_i + (rotating_offset * ROTATE_SEGMENT)) /
                   ROTATING_PERIOD).to_i
-      # 16 (digest size) - 3 (bytes used)
-      digest_offset = rotation % 13
-      # We get the postion from 3 bytes (24 bits)
-      event_idx =
-        ("\0" + Digest::MD5.digest(object_id)[digest_offset, 3]).
-        unpack("N")[0] % MAX_ENTRIES
+      # We have a 128 bit integer and need to get 24 bits (3 bytes)
+      digest_offset = rotation % 104
+      # We get the position from 3 bytes (24 bits)
+      event_idx = ((verylong_int >> digest_offset) & 16777215) % MAX_ENTRIES
       [ event_idx / ENTRIES_PER_BYTE, event_idx % ENTRIES_PER_BYTE ]
     end
   end
@@ -1014,18 +1018,29 @@ class FilesState
 
   def status
     return if @next_status_at > Time.now
+    last_compressed_cost =
+      @fragmentation_info_mutex.synchronize {
+      @file_fragmentations[:compressed][0] ?
+        "%.2f" % @file_fragmentations[:compressed][0].fragmentation_cost :
+        "none"
+    }
+    last_uncompressed_cost =
+      @fragmentation_info_mutex.synchronize {
+      @file_fragmentations[:uncompressed][0] ?
+        "%.2f" % @file_fragmentations[:uncompressed][0].fragmentation_cost :
+        "none"
+    }
     info(("# #{@btrfs.dirname} c: %.1f%%; " \
-           "(c/u) queued: %d/%d; " \
-           "ini: %.2f/%.2f; " \
-           "avg: %.2f/%.2f; " \
-           "cur: %.3f/%.3f; " \
+           "Queued (c/u): %d/%d " \
+           "C: %.2f→%.2f,q:%s,t:%.2f " \
+           "U: %.2f→%.2f,q:%s,t:%.2f " \
            "flw: %d; recent: %d") %
          [ type_share(:compressed) * 100,
            queue_size(:compressed), queue_size(:uncompressed),
-           @initial_costs[:compressed], @initial_costs[:uncompressed],
-           @average_costs[:compressed], @average_costs[:uncompressed],
-           current_queue_threshold(:compressed),
-           current_queue_threshold(:uncompressed),
+           @initial_costs[:compressed], @average_costs[:compressed],
+           last_compressed_cost, @cost_thresholds[:compressed],
+           @initial_costs[:uncompressed], @average_costs[:uncompressed],
+           last_uncompressed_cost, @cost_thresholds[:uncompressed],
            @written_files.size, @recently_defragmented.size ])
     @next_status_at += STATUS_PERIOD while Time.now > @next_status_at
   end
