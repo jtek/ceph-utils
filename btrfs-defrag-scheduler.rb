@@ -140,6 +140,7 @@ SLOW_SCAN_PERIOD = (scan_time || 7 * 24) * 3600 # 1 week
 SLOW_SCAN_CATCHUP_WAIT = slow_start
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 5 / $speed_multiplier
+# TODO: check the logic around this constant, probably not useful
 MAX_DELAY_BETWEEN_FILEFRAGS = 180
 # Batch size constraints for full refresh thread
 MAX_FILES_BATCH_SIZE = (250 * $speed_multiplier).to_i
@@ -1628,7 +1629,7 @@ class BtrfsDev
       (left.to_f / MAX_FILES_BATCH_SIZE) * MIN_DELAY_BETWEEN_FILEFRAGS
     can_slow = expected_time_left > min_process_left
     max_process_left =
-      (left.to_f / MIN_FILES_BATCH_SIZE) * MAX_DELAY_BETWEEN_DEFRAGS
+      (left.to_f / MIN_FILES_BATCH_SIZE) * MAX_DELAY_BETWEEN_FILEFRAGS
     can_speed = expected_time_left < max_process_left
     queue_proportion = @files_state.queue_fill_proportion
     # 2x wait if full
