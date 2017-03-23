@@ -1606,6 +1606,7 @@ class BtrfsDev
 
   def wait_before_next_slow_scan_pass(count)
     update_filecount(processed: count, total: @filecount)
+    @slow_batch_size = ideal_slow_batch_size(left, expected_time_left)
     delay =
       if @filecount.nil?
         MIN_DELAY_BETWEEN_FILEFRAGS
@@ -1625,7 +1626,6 @@ class BtrfsDev
     # Count time spent computing a batch to compensate for it
     batch_delay = Time.now - @last_slow_scan_pause
     expected_time_left = @slow_scan_stop_time - Time.now
-    @slow_batch_size = ideal_slow_batch_size(left, expected_time_left)
     # How soon can we reach the end at max speed?
     min_process_left =
       (left.to_f / MAX_FILES_BATCH_SIZE) * MIN_DELAY_BETWEEN_FILEFRAGS
