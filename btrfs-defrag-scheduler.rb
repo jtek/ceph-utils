@@ -1603,21 +1603,48 @@ class BtrfsDev
 
   def wait_before_next_slow_scan_pass(count)
     update_filecount(processed: count, total: @filecount)
-    if @filecount.nil?
-      sleep MIN_DELAY_BETWEEN_FILEFRAGS
-    elsif (Time.now < @slow_scan_stop_time) && (count < filecount)
-      # Count time spent computing a batch to compensate for it
-      batch_delay = Time.now - @last_slow_scan_pause
-      interval =
-        (@slow_scan_stop_time - Time.now) * @slow_batch_size /
-        @slow_pass_expected_left
-      sleep([ [ interval - batch_delay, MIN_DELAY_BETWEEN_FILEFRAGS ].max,
-              MAX_DELAY_BETWEEN_FILEFRAGS ].min)
-    else
-      # We can't compute a good interval use MIN_DELAY
-      sleep MIN_DELAY_BETWEEN_FILEFRAGS
-    end
+    delay =
+      if @filecount.nil?
+        MIN_DELAY_BETWEEN_FILEFRAGS
+      elsif (Time.now < @slow_scan_stop_time) && (count < filecount)
+        compute_slow_scan_delay(filecount - count)
+      else
+        # We can't compute a good interval use MIN_DELAY
+        MIN_DELAY_BETWEEN_FILEFRAGS
+      end
+    sleep delay
     @last_slow_scan_pause = Time.now
+  end
+
+  # This is adaptative: we wait more if the queue is full and we can afford it
+  # and speed up on empty queues
+  def compute_slow_scan_delay(left)
+    # Count time spent computing a batch to compensate for it
+    batch_delay = Time.now - @last_slow_scan_pause
+    expected_time_left = @slow_scan_stop_time - Time.now
+    @slow_batch_size = ideal_slow_batch_size(left, expected_time_left)
+    # How soon can we reach the end at max speed?
+    min_process_left =
+      (left.to_f / MAX_FILES_BATCH_SIZE) * MIN_DELAY_BETWEEN_FILEFRAGS
+    can_slow = expected_time_left > min_process_left
+    max_process_left =
+      (left.to_f / MIN_FILES_BATCH_SIZE) * MAX_DELAY_BETWEEN_DEFRAGS
+    can_speed = expected_time_left < max_process_left
+    queue_proportion = @files_state.queue_fill_proportion
+    # 2x wait if full
+    # 0.5x wait if empty
+    wait_factor = if queue_proportion > 0.5
+                    (queue_proportion - 0.5) * 2 + 1
+                  else
+                    (queue_proportion + 0.5)
+                  end
+    wait_factor = [ wait_factor, 1 ].max unless can_slow
+    wait_factor = [ wait_factor, 1 ].min unless cas_speed
+    interval =
+      (@slow_scan_stop_time - Time.now) * @slow_batch_size /
+      @slow_pass_expected_left
+    [ [ (interval * wait_factor) - batch_delay, MIN_DELAY_BETWEEN_FILEFRAGS ].max,
+      MAX_DELAY_BETWEEN_FILEFRAGS ].min
   end
 
   def ideal_slow_batch_size(filecount, time_left)
