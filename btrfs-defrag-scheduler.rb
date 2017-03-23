@@ -977,17 +977,18 @@ class FilesState
     to_check = []
     args_length = 0
     @writes_mutex.synchronize {
-      @written_files.each { |shortname,value|
+      @written_files.each do |shortname,value|
         if value.ready_for_frag_check?(@btrfs.commit_delay)
           batch << shortname
           fullname = @btrfs.full_filename(shortname)
-          to_check << fullname if File.file?(fullname)
+          next unless File.file?(fullname)
+          to_check << fullname
           args_length += fullname.size + 1
           # We must limit the argument length (the rest will be processed
           # during a future call)
           break if args_length >= FILEFRAG_ARG_MAX
         end
-      }
+      end
     }
     # We remove them from @written_files because update_files filters
     # according to its content
@@ -996,8 +997,8 @@ class FilesState
     }
     update_files(FileFragmentation.batch_init(to_check, @btrfs),
                  fatrace_threshold_multiplier)
+    # Cleanup written_files if it overflows, moving files to the defragmentation queue
     to_check = []
-    # Cleanup if overflow
     @writes_mutex.synchronize {
       if @written_files.size > MAX_TRACKED_WRITTEN_FILES
         to_remove = @written_files.size - MAX_TRACKED_WRITTEN_FILES
