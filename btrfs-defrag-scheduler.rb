@@ -145,8 +145,8 @@ MAX_DELAY_BETWEEN_FILEFRAGS = 180
 MAX_FILES_BATCH_SIZE = (250 * $speed_multiplier).to_i
 MIN_FILES_BATCH_SIZE = 10
 
-# We ignore files recently defragmented for 12 hours
-IGNORE_AFTER_DEFRAG_DELAY = 12 * 3600
+# We ignore files recently defragmented for 6 hours
+IGNORE_AFTER_DEFRAG_DELAY = 6 * 3600
 
 MIN_DELAY_BETWEEN_DEFRAGS = 0.1
 MAX_DELAY_BETWEEN_DEFRAGS = 10
