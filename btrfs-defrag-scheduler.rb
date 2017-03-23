@@ -138,6 +138,8 @@ MAX_WRITES_DELAY = 2 * 3600
 # (pass number of hours on commandline if the default is not wanted)
 SLOW_SCAN_PERIOD = (scan_time || 7 * 24) * 3600 # 1 week
 SLOW_SCAN_CATCHUP_WAIT = slow_start
+SLOW_SCAN_MAX_WAIT_FACTOR = 5
+SLOW_SCAN_MIN_WAIT_FACTOR = 0.2
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 5 / $speed_multiplier
 # TODO: check the logic around this constant, probably not useful
@@ -1632,20 +1634,20 @@ class BtrfsDev
       (left.to_f / MIN_FILES_BATCH_SIZE) * MAX_DELAY_BETWEEN_FILEFRAGS
     can_speed = expected_time_left < max_process_left
     queue_proportion = @files_state.queue_fill_proportion
-    # 2x wait if full
-    # 0.5x wait if empty
     wait_factor = if queue_proportion > 0.5
-                    (queue_proportion - 0.5) * 2 + 1
+                    ((queue_proportion - 0.5) * 2 *
+                     (SLOW_SCAN_MAX_WAIT_FACTOR - 1)) + 1
                   else
-                    (queue_proportion + 0.5)
+                    SLOW_SCAN_MIN_WAIT_FACTOR +
+                      ((0.5 - queue_proportion) * 2 *
+                       (1 - SLOW_SCAN_MIN_WAIT_FACTOR))
                   end
     wait_factor = [ wait_factor, 1 ].min unless can_slow
     wait_factor = [ wait_factor, 1 ].max unless cas_speed
     interval =
       (@slow_scan_stop_time - Time.now) * @slow_batch_size /
       @slow_pass_expected_left
-    [ [ (interval * wait_factor) - batch_delay, MIN_DELAY_BETWEEN_FILEFRAGS ].max,
-      MAX_DELAY_BETWEEN_FILEFRAGS ].min
+    [ [ (interval * wait_factor) - batch_delay, 0 ].max
   end
 
   def ideal_slow_batch_size(filecount, time_left)
