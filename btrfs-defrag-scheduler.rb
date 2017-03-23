@@ -1432,7 +1432,7 @@ class BtrfsDev
     count = 0; already_processed = 0; recent = 0; queued = 0
     filelist = []
     filelist_arg_length = 0
-    start = @last_slow_scan_pause = Time.now
+    start = @last_slow_scan_batch_start = Time.now
     # If we skip some files, we don't wait for the whole scan period either
     duration_factor =
       if first_pass && @filecount && @filecount > 0
@@ -1619,14 +1619,25 @@ class BtrfsDev
         MIN_DELAY_BETWEEN_FILEFRAGS
       end
     sleep delay
-    @last_slow_scan_pause = Time.now
+    @last_slow_scan_batch_start = Time.now
   end
 
   # This is adaptative: we wait more if the queue is full and we can afford it
   # and speed up on empty queues
   def compute_slow_scan_delay
     # Count time spent computing a batch to compensate for it
-    batch_delay = Time.now - @last_slow_scan_pause
+    batch_delay = Time.now - @last_slow_scan_batch_start
+    interval =
+      (@slow_scan_stop_time - Time.now) * @slow_batch_size /
+      @slow_scan_expected_left
+    # If we can't keep up, increase the batch size
+    if (interval * wait_factor) < batch_delay
+      @slow_batch_size = (@slow_batch_size * (batch_delay / (interval * wait_factor))).ceil
+    end
+    [ (interval * wait_factor) - batch_delay, 0 ].max
+  end
+
+  def wait_factor
     expected_time_left = @slow_scan_stop_time - Time.now
     # How soon can we reach the end at max speed?
     min_process_left =
@@ -1646,10 +1657,7 @@ class BtrfsDev
                   end
     wait_factor = [ wait_factor, 1 ].min unless can_slow
     wait_factor = [ wait_factor, 1 ].max unless can_speed
-    interval =
-      (@slow_scan_stop_time - Time.now) * @slow_batch_size /
-      @slow_scan_expected_left
-    [ (interval * wait_factor) - batch_delay, 0 ].max
+    wait_factor
   end
 
   def ideal_slow_batch_size
