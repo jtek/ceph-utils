@@ -1593,10 +1593,9 @@ class BtrfsDev
   # Return number of items queued
   def queue_slow_batch(count, filelist)
     @slow_pass_expected_left = filecount - count
-    # Use larger batch if we didn't finish in time
+    # Use largest batch if we didn't finish in time
     if @slow_pass_expected_left < 0 || Time.now > @slow_scan_stop_time
-      @slow_batch_size =
-        [ (@slow_batch_size * 1.1).ceil, MAX_FILES_BATCH_SIZE ].min
+      @slow_batch_size = MAX_FILES_BATCH_SIZE
     end
     frags = FileFragmentation.batch_init(filelist, self)
     @files_state.update_files(frags)
