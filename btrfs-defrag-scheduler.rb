@@ -1574,9 +1574,9 @@ class BtrfsDev
                     ((processed.to_f - @last_processed) / filecount) > 0.001
                 end
     return unless do_update
-    @filecount = total
+    @filecount = total || @filecount
     @last_processed = processed
-    entry = { processed: processed, total: total }
+    entry = { processed: @last_processed, total: @filecount }
     serialize_entry(@dir, entry, FILE_COUNT_STORE)
     info "# #{@dirname}, #{entry.inspect}" if total && $debug
   end
@@ -1607,7 +1607,7 @@ class BtrfsDev
   end
 
   def wait_before_next_slow_scan_pass(count)
-    update_filecount(processed: count, total: @filecount)
+    update_filecount(processed: count)
     @slow_batch_size = ideal_slow_batch_size
     delay =
       if @filecount.nil?
