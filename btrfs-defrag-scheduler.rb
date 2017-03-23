@@ -1440,11 +1440,13 @@ class BtrfsDev
       else
         1
       end
+    @slow_scan_expected_left = filecount
+    @slow_scan_expected_left -= @last_processed if first_pass
     @slow_scan_stop_time = start + duration_factor * SLOW_SCAN_PERIOD
     @next_slow_status_at ||= Time.now
     # Target a batch size for MIN_DELAY_BETWEEN_FILEFRAGS interval between
     # filefrag calls
-    @slow_batch_size = ideal_slow_batch_size(filecount, SLOW_SCAN_PERIOD)
+    @slow_batch_size = ideal_slow_batch_size
     begin
       Find.find(dir) do |path|
         slow_status(start, queued, count, already_processed, recent)
@@ -1595,9 +1597,9 @@ class BtrfsDev
 
   # Return number of items queued
   def queue_slow_batch(count, filelist)
-    @slow_pass_expected_left = filecount - count
+    @slow_scan_expected_left = filecount - count
     # Use largest batch if we didn't finish in time
-    if @slow_pass_expected_left < 0 || Time.now > @slow_scan_stop_time
+    if @slow_scan_expected_left < 0 || Time.now > @slow_scan_stop_time
       @slow_batch_size = MAX_FILES_BATCH_SIZE
     end
     frags = FileFragmentation.batch_init(filelist, self)
@@ -1606,12 +1608,12 @@ class BtrfsDev
 
   def wait_before_next_slow_scan_pass(count)
     update_filecount(processed: count, total: @filecount)
-    @slow_batch_size = ideal_slow_batch_size(left, expected_time_left)
+    @slow_batch_size = ideal_slow_batch_size
     delay =
       if @filecount.nil?
         MIN_DELAY_BETWEEN_FILEFRAGS
       elsif (Time.now < @slow_scan_stop_time) && (count < filecount)
-        compute_slow_scan_delay(filecount - count)
+        compute_slow_scan_delay
       else
         # We can't compute a good interval use MIN_DELAY
         MIN_DELAY_BETWEEN_FILEFRAGS
@@ -1622,16 +1624,16 @@ class BtrfsDev
 
   # This is adaptative: we wait more if the queue is full and we can afford it
   # and speed up on empty queues
-  def compute_slow_scan_delay(left)
+  def compute_slow_scan_delay
     # Count time spent computing a batch to compensate for it
     batch_delay = Time.now - @last_slow_scan_pause
     expected_time_left = @slow_scan_stop_time - Time.now
     # How soon can we reach the end at max speed?
     min_process_left =
-      (left.to_f / MAX_FILES_BATCH_SIZE) * MIN_DELAY_BETWEEN_FILEFRAGS
+      (@slow_scan_expected_left.to_f / MAX_FILES_BATCH_SIZE) * MIN_DELAY_BETWEEN_FILEFRAGS
     can_slow = expected_time_left > min_process_left
     max_process_left =
-      (left.to_f / MIN_FILES_BATCH_SIZE) * MAX_DELAY_BETWEEN_FILEFRAGS
+      (@slow_scan_expected_left.to_f / MIN_FILES_BATCH_SIZE) * MAX_DELAY_BETWEEN_FILEFRAGS
     can_speed = expected_time_left < max_process_left
     queue_proportion = @files_state.queue_fill_proportion
     wait_factor = if queue_proportion > 0.5
@@ -1646,12 +1648,13 @@ class BtrfsDev
     wait_factor = [ wait_factor, 1 ].max unless cas_speed
     interval =
       (@slow_scan_stop_time - Time.now) * @slow_batch_size /
-      @slow_pass_expected_left
-    [ [ (interval * wait_factor) - batch_delay, 0 ].max
+      @slow_scan_expected_left
+    [ (interval * wait_factor) - batch_delay, 0 ].max
   end
 
-  def ideal_slow_batch_size(filecount, time_left)
-    [ (MIN_DELAY_BETWEEN_FILEFRAGS.to_f * filecount / time_left).ceil,
+  def ideal_slow_batch_size
+    [ ((MIN_DELAY_BETWEEN_FILEFRAGS.to_f * @slow_scan_expected_left) /
+       (@slow_scan_stop_time - Time.now)).ceil,
       MIN_FILES_BATCH_SIZE ].max
   end
 
@@ -1673,7 +1676,7 @@ class BtrfsDev
     @next_slow_status_at += SLOW_STATUS_PERIOD
     msg = ("#{stopped ? '#' : '-'} %s %d%% %d/%ds: %d queued / %d found, " +
            "%d defragmented recently, %d changed recently, %d low cost") %
-          [ @dirname, scan_on_track_percent(start),
+          [ @dirname, scan_on_track_percent(start, count),
             (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
             already_processed, recent,
             count - already_processed - recent - queued ]
@@ -1684,7 +1687,7 @@ class BtrfsDev
     info msg
   end
 
-  def scan_on_track_percent(start)
+  def scan_on_track_percent(start, count)
     # Can't compute on first pass
     return 100 if @filecount.nil?
     (100 * (count.to_f / @filecount) /
