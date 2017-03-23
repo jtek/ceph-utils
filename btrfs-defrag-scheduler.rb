@@ -651,13 +651,15 @@ class FilesState
   # It isn't thread safe but in the event of a race condition
   # it can only create minor false recent positive/negative recent test results
   # This is considered acceptable and may be protected by caller if needed
+  # Idea: we can modify the tick delay value dynamically to try to keep size
+  # below a portion of the bitarray (minimizing the false positive probability)
   class FuzzyEventTracker
     # Must be 1, 2, 4 or 8 depending on the precision objective
     # higher value can avoid temporary high spikes of queued files
     BITS_PER_ENTRY = 8
     # Should be enough: we don't expect to defragment more than 1/s
     # there's an hardcoded limit of 24 in position_offset
-    ENTRIES_INDEX_BITS = 18
+    ENTRIES_INDEX_BITS = 16
     MAX_ENTRIES = 2 ** ENTRIES_INDEX_BITS
     ENTRIES_PER_BYTE = 8 / BITS_PER_ENTRY
     MAX_ENTRY_VALUE = (2 ** BITS_PER_ENTRY) - 1
