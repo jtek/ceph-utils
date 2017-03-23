@@ -1669,9 +1669,10 @@ class BtrfsDev
                         stopped = false)
     return if @next_slow_status_at > Time.now
     @next_slow_status_at += SLOW_STATUS_PERIOD
-    msg = ("#{stopped ? '#' : '-'} %s %d/%ds: %d queued / %d found, " +
+    msg = ("#{stopped ? '#' : '-'} %s %d%% %d/%ds: %d queued / %d found, " +
            "%d defragmented recently, %d changed recently, %d low cost") %
-          [ @dirname, (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
+          [ @dirname, scan_on_track_percent(start),
+            (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
             already_processed, recent,
             count - already_processed - recent - queued ]
     if @files_state.last_queue_overflow_at &&
@@ -1679,6 +1680,13 @@ class BtrfsDev
       msg += " ovf: #{(Time.now - @files_state.last_queue_overflow_at).to_i}s ago"
     end
     info msg
+  end
+
+  def scan_on_track_percent(start)
+    # Can't compute on first pass
+    return 100 if @filecount.nil?
+    (100 * (count.to_f / @filecount) /
+     ((Time.now - start).to_f / SLOW_SCAN_PERIOD)).to_i
   end
 
   # Don't loop on defrag aggressively if there isn't much to be done
