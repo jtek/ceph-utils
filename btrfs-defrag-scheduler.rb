@@ -1441,9 +1441,7 @@ class BtrfsDev
     @next_slow_status_at ||= Time.now
     # Target a batch size for MIN_DELAY_BETWEEN_FILEFRAGS interval between
     # filefrag calls
-    @slow_batch_size =
-      [ MIN_DELAY_BETWEEN_FILEFRAGS * filecount / SLOW_SCAN_PERIOD,
-        MIN_FILES_BATCH_SIZE ].max
+    @slow_batch_size = ideal_slow_batch_size(filecount, SLOW_SCAN_PERIOD)
     begin
       Find.find(dir) do |path|
         slow_status(start, queued, count, already_processed, recent)
@@ -1621,6 +1619,11 @@ class BtrfsDev
       sleep MIN_DELAY_BETWEEN_FILEFRAGS
     end
     @last_slow_scan_pause = Time.now
+  end
+
+  def ideal_slow_batch_size(filecount, time_left)
+    [ (MIN_DELAY_BETWEEN_FILEFRAGS.to_f * filecount / time_left).ceil,
+      MIN_FILES_BATCH_SIZE ].max
   end
 
   def wait_before_slow_scan_restart(guessed_filecount)
