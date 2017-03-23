@@ -1645,7 +1645,7 @@ class BtrfsDev
                        (1 - SLOW_SCAN_MIN_WAIT_FACTOR))
                   end
     wait_factor = [ wait_factor, 1 ].min unless can_slow
-    wait_factor = [ wait_factor, 1 ].max unless cas_speed
+    wait_factor = [ wait_factor, 1 ].max unless can_speed
     interval =
       (@slow_scan_stop_time - Time.now) * @slow_batch_size /
       @slow_scan_expected_left
