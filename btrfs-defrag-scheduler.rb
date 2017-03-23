@@ -1096,7 +1096,7 @@ class FilesState
     # The longer we wait after defrag, the lower the multiplier:
     # each file defragmented because fatrace bring as much benefit than
     # a file defragmented because of the slow scan
-    [ SLOW_SCAN_PERIOD.to_f / IGNORE_AFTER_DEFRAG_DELAY, 1 ].min
+    [ SLOW_SCAN_PERIOD.to_f / IGNORE_AFTER_DEFRAG_DELAY, 1 ].max
   end
   def must_serialize_history?
     @last_history_serialized_at < (Time.now - HISTORY_SERIALIZE_DELAY)
