@@ -1638,8 +1638,8 @@ class BtrfsDev
                   else
                     (queue_proportion + 0.5)
                   end
-    wait_factor = [ wait_factor, 1 ].max unless can_slow
-    wait_factor = [ wait_factor, 1 ].min unless cas_speed
+    wait_factor = [ wait_factor, 1 ].min unless can_slow
+    wait_factor = [ wait_factor, 1 ].max unless cas_speed
     interval =
       (@slow_scan_stop_time - Time.now) * @slow_batch_size /
       @slow_pass_expected_left
