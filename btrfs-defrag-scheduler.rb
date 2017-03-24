@@ -141,11 +141,9 @@ SLOW_SCAN_CATCHUP_WAIT = slow_start
 SLOW_SCAN_MAX_WAIT_FACTOR = 5
 SLOW_SCAN_MIN_WAIT_FACTOR = 0.2
 # Sleep constraints between 2 filefrags call in full refresh thread
-MIN_DELAY_BETWEEN_FILEFRAGS = 5 / $speed_multiplier
-# TODO: check the logic around this constant, probably not useful
-MAX_DELAY_BETWEEN_FILEFRAGS = 180
+MIN_DELAY_BETWEEN_FILEFRAGS = 2 / $speed_multiplier
 # Batch size constraints for full refresh thread
-MAX_FILES_BATCH_SIZE = (250 * $speed_multiplier).to_i
+MAX_FILES_BATCH_SIZE = (500 * $speed_multiplier).to_i
 MIN_FILES_BATCH_SIZE = 10
 
 # We ignore files recently defragmented for 6 hours
