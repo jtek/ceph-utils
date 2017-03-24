@@ -1475,8 +1475,7 @@ class BtrfsDev
             recent += 1
             next
           end
-          # TODO: check minimum allocation size (16k according to btrfs-users@?)
-          # File too small to be fragmented?
+          # Files small enough to fit a node can't be fragmented
           next if stat.size <= 4096
 
           filelist << path
@@ -1641,9 +1640,6 @@ class BtrfsDev
     min_process_left =
       (@slow_scan_expected_left.to_f / MAX_FILES_BATCH_SIZE) * MIN_DELAY_BETWEEN_FILEFRAGS
     can_slow = expected_time_left > min_process_left
-    max_process_left =
-      (@slow_scan_expected_left.to_f / MIN_FILES_BATCH_SIZE) * MAX_DELAY_BETWEEN_FILEFRAGS
-    can_speed = expected_time_left < max_process_left
     queue_proportion = @files_state.queue_fill_proportion
     wait_factor = if queue_proportion > 0.5
                     ((queue_proportion - 0.5) * 2 *
@@ -1654,7 +1650,6 @@ class BtrfsDev
                        (1 - SLOW_SCAN_MIN_WAIT_FACTOR))
                   end
     wait_factor = [ wait_factor, 1 ].min unless can_slow
-    wait_factor = [ wait_factor, 1 ].max unless can_speed
     wait_factor
   end
 
