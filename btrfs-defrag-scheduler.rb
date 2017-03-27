@@ -1630,7 +1630,7 @@ class BtrfsDev
     # If we can't keep up, first increase batch size
     if (min_interval * factor) < previous_batch_delay
       $slow_batch_size = ((MIN_FILES_BATCH_SIZE * previous_batch_delay) /
-                          (interval * factor))).ceil
+                          (min_interval * factor)).ceil
     end
     $slow_batch_size = [ $slow_batch_size, MAX_FILES_BATCH_SIZE ].min
     # Compute target delay
