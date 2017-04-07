@@ -98,7 +98,7 @@ end
 # to defragment
 COST_HISTORY_SIZE = 2000
 # Tune this to change the effort made to defragment (1.0: max effort)
-MIN_EXPECTED_BENEFIT = 1.05
+MIN_FRAGMENTATION_THRESHOLD = 1.05
 # Dangerous, can try to defragment many files that can't be
 # defragmented if set too low
 COST_THRESHOLD_PERCENTILE = 50
@@ -1080,7 +1080,7 @@ class FilesState
         total_weight += result[2] * weight
       end
       # Percentile reached
-      @cost_thresholds[key] = result[1] * MIN_EXPECTED_BENEFIT
+      @cost_thresholds[key] = [ result[1], MIN_FRAGMENTATION_THRESHOLD ].max
       # Continue with the rest
       while ordered_history.any?
         result, weight = ordered_history.shift
