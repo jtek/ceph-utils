@@ -1477,7 +1477,11 @@ class BtrfsDev
             next
           end
           # Files small enough to fit a node can't be fragmented
-          next if stat.size <= 4096
+          if stat.size <= 4096
+            # We don't count it as if nothing changes it won't become a target
+            count -= 1
+            next
+          end
 
           filelist << path
           filelist_arg_length += (path.size + 1) # count space
