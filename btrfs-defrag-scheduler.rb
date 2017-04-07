@@ -114,8 +114,9 @@ SPEED_FACTOR_WITH_EMPTY_QUEUE = 0.2
 # (values when queue == MAX_QUEUE_LENGTH)
 # time window => max_device_use_ratio
 DEVICE_USE_LIMITS = {
-  5 => 0.5 * $speed_multiplier,
-  30 => 0.25 * $speed_multiplier,
+  3 => 0.5 * $speed_multiplier,
+  7 => 0.4 * $speed_multiplier,
+  11 => 0.33 * $speed_multiplier,
 }
 EXPECTED_COMPRESS_RATIO = 0.5
 
