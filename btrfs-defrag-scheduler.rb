@@ -846,6 +846,9 @@ class FilesState
     end
   end
 
+  # TODO: maybe only track recent defragmentations for WriteEvents-triggered
+  # deframentations
+  # (this would keep it small and should have the same behaviour)
   def defragmented!(shortname)
     @fragmentation_info_mutex.synchronize do
       @recently_defragmented.event(shortname)
@@ -1649,7 +1652,8 @@ class BtrfsDev
     expected_time_left = @slow_scan_stop_time - Time.now
     # How soon can we reach the end at max speed?
     min_process_left =
-      (@slow_scan_expected_left.to_f / MAX_FILES_BATCH_SIZE) * MIN_DELAY_BETWEEN_FILEFRAGS
+      (@slow_scan_expected_left.to_f / MAX_FILES_BATCH_SIZE) *
+      MIN_DELAY_BETWEEN_FILEFRAGS
     can_slow = expected_time_left > min_process_left
     queue_proportion = @files_state.queue_fill_proportion
     wait_factor = if queue_proportion > 0.5
@@ -1665,7 +1669,8 @@ class BtrfsDev
   end
 
   def update_slow_batch_size
-    @slow_batch_size = [ ((MIN_DELAY_BETWEEN_FILEFRAGS.to_f * @slow_scan_expected_left) /
+    @slow_batch_size = [ ((MIN_DELAY_BETWEEN_FILEFRAGS.to_f *
+                           @slow_scan_expected_left) /
                           (@slow_scan_stop_time - Time.now)).ceil,
                          MIN_FILES_BATCH_SIZE ].max
   end
