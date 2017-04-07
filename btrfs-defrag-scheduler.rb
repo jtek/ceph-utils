@@ -139,8 +139,8 @@ MAX_WRITES_DELAY = 2 * 3600
 # (pass number of hours on commandline if the default is not wanted)
 SLOW_SCAN_PERIOD = (scan_time || 7 * 24) * 3600 # 1 week
 SLOW_SCAN_CATCHUP_WAIT = slow_start
-SLOW_SCAN_MAX_WAIT_FACTOR = 5
-SLOW_SCAN_MIN_WAIT_FACTOR = 0.2
+SLOW_SCAN_MAX_WAIT_FACTOR = 10
+SLOW_SCAN_MIN_WAIT_FACTOR = 0.8
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 2 / $speed_multiplier
 # Batch size constraints for full refresh thread
