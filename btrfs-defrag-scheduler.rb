@@ -1640,7 +1640,7 @@ class BtrfsDev
       $slow_batch_size = ((MIN_FILES_BATCH_SIZE * previous_batch_delay) /
                           (min_interval * factor)).ceil
     end
-    $slow_batch_size = [ $slow_batch_size, MAX_FILES_BATCH_SIZE ].min
+    $slow_batch_size = [ $slow_batch_size, MAX_FILES_BATCH_SIZE ].compact.min
     # Compute target delay
     delay = ((@slow_scan_stop_time - Time.now) * $slow_batch_size /
              @slow_scan_expected_left)
