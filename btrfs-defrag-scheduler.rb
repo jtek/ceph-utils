@@ -143,6 +143,7 @@ SLOW_SCAN_MAX_WAIT_FACTOR = 10
 SLOW_SCAN_MIN_WAIT_FACTOR = 0.8
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 2 / $speed_multiplier
+MAX_DELAY_BETWEEN_FILEFRAGS = 3600
 # Batch size constraints for full refresh thread
 MAX_FILES_BATCH_SIZE = (500 * $speed_multiplier).to_i
 MIN_FILES_BATCH_SIZE = 10
@@ -1644,7 +1645,8 @@ class BtrfsDev
     # Compute target delay
     delay = ((@slow_scan_stop_time - Time.now) * $slow_batch_size /
              @slow_scan_expected_left)
-    delay = [ delay, MIN_DELAY_BETWEEN_FILEFRAGS ].max
+    delay = [ [ delay, MIN_DELAY_BETWEEN_FILEFRAGS ].max,
+              MAX_DELAY_BETWEEN_FILEFRAGS ].min
     [ (delay * factor) - previous_batch_delay, 0 ].max
   end
 
