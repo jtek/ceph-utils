@@ -107,16 +107,17 @@ HISTORY_SERIALIZE_DELAY = 3600
 RECENT_SERIALIZE_DELAY = 120
 
 # How many files do we queue for defragmentation
-MAX_QUEUE_LENGTH = 2000
+MAX_QUEUE_LENGTH = 500
+QUEUE_PROPORTION_EQUILIBRIUM = 0.1
 # How much do we slow defragmentation frequency when the queue is empty
 SPEED_FACTOR_WITH_EMPTY_QUEUE = 0.2
 # How much device time the program is allowed to use
 # (values when queue == MAX_QUEUE_LENGTH)
 # time window => max_device_use_ratio
 DEVICE_USE_LIMITS = {
-  3 => 0.5 * $speed_multiplier,
-  7 => 0.4 * $speed_multiplier,
-  11 => 0.33 * $speed_multiplier,
+  0.5 => 0.5 * $speed_multiplier,
+  3 => 0.45 * $speed_multiplier,
+  11 => 0.4 * $speed_multiplier,
 }
 EXPECTED_COMPRESS_RATIO = 0.5
 
@@ -133,30 +134,34 @@ TRACKED_WRITTEN_FILES_CONSOLIDATION_PERIOD = 5
 DEFAULT_COMMIT_DELAY = 30
 # Some files might be written constantly, don't delay passing them to filefrag
 # more than that
-MAX_WRITES_DELAY = 2 * 3600
+MAX_WRITES_DELAY = 4 * 3600
 
 # Full refresh of fragmentation information on files happens in
 # (pass number of hours on commandline if the default is not wanted)
 SLOW_SCAN_PERIOD = (scan_time || 7 * 24) * 3600 # 1 week
 SLOW_SCAN_CATCHUP_WAIT = slow_start
-SLOW_SCAN_MAX_WAIT_FACTOR = 10
+SLOW_SCAN_MAX_WAIT_FACTOR = 100
 SLOW_SCAN_MIN_WAIT_FACTOR = 0.8
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 2 / $speed_multiplier
 MAX_DELAY_BETWEEN_FILEFRAGS = 3600
 # Batch size constraints for full refresh thread
-MAX_FILES_BATCH_SIZE = (500 * $speed_multiplier).to_i
+# don't make it so large that at cruising speed it could overflow the queue
+# with only one batch
+MAX_FILES_BATCH_SIZE =
+  (MAX_QUEUE_LENGTH * (1 - QUEUE_PROPORTION_EQUILIBRIUM)).to_i
 MIN_FILES_BATCH_SIZE = 10
 
 # We ignore files recently defragmented for 12 hours
 IGNORE_AFTER_DEFRAG_DELAY = 12 * 3600
 
 MIN_DELAY_BETWEEN_DEFRAGS = 0.02
+# Actually max delay before checking for when to defrag next
 MAX_DELAY_BETWEEN_DEFRAGS = 10
 
 # How often do we dump a status update
 STATUS_PERIOD = 120 # every 2 minutes
-SLOW_STATUS_PERIOD = 900
+SLOW_STATUS_PERIOD = 1800 # every 30 minutes
 # How often do we check for new filesystems or umounted filesystems
 FS_DETECT_PERIOD = 60
 # How often do we restart the fatrace thread ?
@@ -260,10 +265,6 @@ class UsagePolicyChecker
   def available?(queue_fill_proportion, expected_time = 0)
     cleanup
 
-    # We slow down defragmentation when there isn't much work
-    # and speed it up when there is more work
-    use_factor = usage_factor(queue_fill_proportion)
-
     # Count usage in each time window
     usage_sums = Hash[ DEVICE_USE_LIMITS.keys.map { |window|  [ window, 0 ] } ]
     # This is non-optimal but it should involve a very small amount of data
@@ -279,10 +280,9 @@ class UsagePolicyChecker
             usage_sums[window] += (stop - window_start)
           end
         end
-        if ((usage_sums[window] + expected_time) / use_factor) >
-            (window * DEVICE_USE_LIMITS[window])
-          return false
-        end
+        next if (usage_sums[window] + expected_time) <=
+                (window * DEVICE_USE_LIMITS[window])
+        return false
       end
     end
     true
@@ -290,18 +290,12 @@ class UsagePolicyChecker
 
   def available_at(queue_fill_proportion, expected_time = 0, min_delay = 0)
     cleanup
-    use_factor = usage_factor(queue_fill_proportion)
     DEVICE_USE_LIMITS.keys.map do |window|
-      next_available_for(window, use_factor, expected_time, min_delay)
+      next_available_for(window, expected_time, min_delay)
     end.max
   end
 
   private
-
-  def usage_factor(queue_fill_proportion)
-    SPEED_FACTOR_WITH_EMPTY_QUEUE + queue_fill_proportion *
-                                    (1 - SPEED_FACTOR_WITH_EMPTY_QUEUE)
-  end
 
   def cleanup
     largest_window = DEVICE_USE_LIMITS.keys.max
@@ -311,10 +305,10 @@ class UsagePolicyChecker
                              first[1] < (this_start - largest_window)
   end
 
-  def next_available_for(window, use_factor, expected_time, min_delay)
+  def next_available_for(window, expected_time, min_delay)
     now = Time.now
     return now + min_delay if window <= min_delay
-    target = DEVICE_USE_LIMITS[window] * use_factor
+    target = DEVICE_USE_LIMITS[window]
     # When will it reach the target use_ratio ?
     return now + dichotomy((min_delay..window), target, 0.001) do |wait|
       use_ratio(now + wait - window, window, expected_time)
@@ -1495,7 +1489,7 @@ class BtrfsDev
              (filelist_arg_length >= FILEFRAG_ARG_MAX)
             queued += queue_slow_batch(count, filelist)
             filelist = []; filelist_arg_length = 0
-            wait_before_next_slow_scan_pass(count)
+            wait_next_slow_scan_pass(count)
           end
         end
       end
@@ -1517,7 +1511,7 @@ class BtrfsDev
            count - already_processed - recent - queued ])
     was_guessed = @filecount.nil?
     update_filecount(processed: 0, total: count)
-    wait_before_slow_scan_restart(was_guessed)
+    wait_slow_scan_restart(was_guessed)
   end
 
   def prune?(entry)
@@ -1605,25 +1599,21 @@ class BtrfsDev
   def queue_slow_batch(count, filelist)
     @slow_scan_expected_left = filecount - count
     # Use largest batch if we didn't finish in time
-    if @slow_scan_expected_left < 0 || Time.now > @slow_scan_stop_time
+    if (@slow_scan_expected_left < 0) || (expected_time_left < 0)
       @slow_batch_size = MAX_FILES_BATCH_SIZE
     end
     frags = FileFragmentation.batch_init(filelist, self)
     @files_state.update_files(frags)
   end
 
-  def wait_before_next_slow_scan_pass(count)
+  def wait_next_slow_scan_pass(count)
     update_filecount(processed: count)
-    if @filecount.nil?
-      @slow_batch_size = MAX_FILES_BATCH_SIZE
-      delay = MIN_DELAY_BETWEEN_FILEFRAGS
-    elsif (Time.now < @slow_scan_stop_time) && (count < filecount)
-      delay = compute_slow_scan_delay
-    else
-      # We can't compute a good interval use MIN_DELAY
-      @slow_batch_size = MAX_FILES_BATCH_SIZE
-      delay = MIN_DELAY_BETWEEN_FILEFRAGS
-    end
+    delay = if @filecount && (expected_time_left > 0) && (count < filecount)
+              compute_slow_scan_delay
+            else
+              @slow_batch_size = MAX_FILES_BATCH_SIZE
+              MIN_DELAY_BETWEEN_FILEFRAGS
+            end
     sleep delay
     @last_slow_scan_batch_start = Time.now
   end
@@ -1632,38 +1622,40 @@ class BtrfsDev
   # and speed up on empty queues using wait_factor
   def compute_slow_scan_delay
     # Count time spent processing a batch to compensate for it
-    previous_batch_delay = Time.now - @last_slow_scan_batch_start
+    previous_batch_duration = Time.now - @last_slow_scan_batch_start
     factor = wait_factor
-    min_interval = (@slow_scan_stop_time - Time.now) * MIN_FILES_BATCH_SIZE /
+    min_interval = expected_time_left * MIN_FILES_BATCH_SIZE /
                    @slow_scan_expected_left
     # If we can't keep up, first increase batch size
-    if (min_interval * factor) < previous_batch_delay
-      $slow_batch_size = ((MIN_FILES_BATCH_SIZE * previous_batch_delay) /
+    if (min_interval * factor) < previous_batch_duration
+      $slow_batch_size = ((MIN_FILES_BATCH_SIZE * previous_batch_duration) /
                           (min_interval * factor)).ceil
     end
     $slow_batch_size = [ $slow_batch_size, MAX_FILES_BATCH_SIZE ].compact.min
     # Compute target delay
-    delay = ((@slow_scan_stop_time - Time.now) * $slow_batch_size /
-             @slow_scan_expected_left)
-    delay = [ [ delay, MIN_DELAY_BETWEEN_FILEFRAGS ].max,
-              MAX_DELAY_BETWEEN_FILEFRAGS ].min
-    [ (delay * factor) - previous_batch_delay, 0 ].max
+    delay = expected_time_left * $slow_batch_size / @slow_scan_expected_left
+    # Sleep to target the compensated delay
+    [ [ (delay * factor) - previous_batch_duration,
+        MIN_DELAY_BETWEEN_FILEFRAGS ].max,
+      MAX_DELAY_BETWEEN_FILEFRAGS ].min
   end
 
   def wait_factor
-    expected_time_left = @slow_scan_stop_time - Time.now
     # How soon can we reach the end at max speed?
     min_process_left =
       (@slow_scan_expected_left.to_f / MAX_FILES_BATCH_SIZE) *
       MIN_DELAY_BETWEEN_FILEFRAGS
     can_slow = expected_time_left > min_process_left
     queue_proportion = @files_state.queue_fill_proportion
-    wait_factor = if queue_proportion > 0.5
-                    ((queue_proportion - 0.5) * 2 *
+    # We slow the scan above QUEUE_PROPORTION_EQUILIBRIUM and speed up below
+    wait_factor = if queue_proportion > QUEUE_PROPORTION_EQUILIBRIUM
+                    ((queue_proportion - QUEUE_PROPORTION_EQUILIBRIUM) /
+                     (1 - QUEUE_PROPORTION_EQUILIBRIUM) *
                      (SLOW_SCAN_MAX_WAIT_FACTOR - 1)) + 1
                   else
                     SLOW_SCAN_MIN_WAIT_FACTOR +
-                      ((0.5 - queue_proportion) * 2 *
+                      ((QUEUE_PROPORTION_EQUILIBRIUM - queue_proportion) /
+                       QUEUE_PROPORTION_EQUILIBRIUM *
                        (1 - SLOW_SCAN_MIN_WAIT_FACTOR))
                   end
     wait_factor = [ wait_factor, 1 ].min unless can_slow
@@ -1673,19 +1665,22 @@ class BtrfsDev
   def update_slow_batch_size
     @slow_batch_size = [ ((MIN_DELAY_BETWEEN_FILEFRAGS.to_f *
                            @slow_scan_expected_left) /
-                          (@slow_scan_stop_time - Time.now)).ceil,
+                          expected_time_left).ceil,
                          MIN_FILES_BATCH_SIZE ].max
   end
 
-  def wait_before_slow_scan_restart(guessed_filecount)
+  def wait_slow_scan_restart(guessed_filecount)
     sleep (if guessed_filecount
              MIN_DELAY_BETWEEN_FILEFRAGS
-           elsif Time.now < @slow_scan_stop_time
-            [ (@slow_scan_stop_time - Time.now),
-              MIN_DELAY_BETWEEN_FILEFRAGS ].max
+           elsif scan_time_left > 0
+            [ scan_time_left, MIN_DELAY_BETWEEN_FILEFRAGS ].max
            else
              MIN_DELAY_BETWEEN_FILEFRAGS
            end)
+  end
+
+  def scan_time_left
+    @slow_scan_stop_time - Time.now
   end
 
   def slow_status(start, queued, count, already_processed, recent,
@@ -1714,9 +1709,9 @@ class BtrfsDev
 
   # Don't loop on defrag aggressively if there isn't much to be done
   def delay_between_defrags
-    # 25 factor: At 4% queue fill (currently 80 files) we use the max speed
+    # At QUEUE_PROPORTION_EQUILIBRIUM we reach the max speed for defrags
     proportional_delay =
-      @files_state.queue_fill_proportion * 25 *
+      @files_state.queue_fill_proportion / QUEUE_PROPORTION_EQUILIBRIUM *
       (MAX_DELAY_BETWEEN_DEFRAGS - MIN_DELAY_BETWEEN_DEFRAGS)
     [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
       MIN_DELAY_BETWEEN_DEFRAGS ].max
