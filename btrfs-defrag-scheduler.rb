@@ -1505,7 +1505,7 @@ class BtrfsDev
       queued += @files_state.update_files(frags)
     end
     info(("# %s %d/%ds: %d queued / %d found, " +
-          "%d defragmented recently, %d changed recently, %d low cost") %
+          "%d recent defrag (fuzzy), %d changed recently, %d low cost") %
          [ @dirname, (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
            already_processed, recent,
            count - already_processed - recent - queued ])
