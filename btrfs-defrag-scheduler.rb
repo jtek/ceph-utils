@@ -1504,11 +1504,6 @@ class BtrfsDev
       frags = FileFragmentation.batch_init(filelist, self)
       queued += @files_state.update_files(frags)
     end
-    info(("# %s %d/%ds: %d queued / %d found, " +
-          "%d recent defrag (fuzzy), %d changed recently, %d low cost") %
-         [ @dirname, (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
-           already_processed, recent,
-           count - already_processed - recent - queued ])
     was_guessed = @filecount.nil?
     update_filecount(processed: 0, total: count)
     wait_slow_scan_restart(was_guessed)
