@@ -1640,17 +1640,17 @@ class BtrfsDev
     min_process_left =
       (@slow_scan_expected_left.to_f / MAX_FILES_BATCH_SIZE) *
       MIN_DELAY_BETWEEN_FILEFRAGS
-    can_slow = expected_time_left > min_process_left
+    can_slow = scan_time_left > min_process_left
     queue_proportion = @files_state.queue_fill_proportion
-    # We slow the scan above QUEUE_PROPORTION_EQUILIBRIUM and speed up below
-    wait_factor = if queue_proportion > QUEUE_PROPORTION_EQUILIBRIUM
-                    ((queue_proportion - QUEUE_PROPORTION_EQUILIBRIUM) /
-                     (1 - QUEUE_PROPORTION_EQUILIBRIUM) *
+    # We slow the scan above 2 * QUEUE_PROPORTION_EQUILIBRIUM and speed up below
+    wait_factor = if queue_proportion > 2 * QUEUE_PROPORTION_EQUILIBRIUM
+                    ((queue_proportion - 2 * QUEUE_PROPORTION_EQUILIBRIUM) /
+                     (1 - 2 * QUEUE_PROPORTION_EQUILIBRIUM) *
                      (SLOW_SCAN_MAX_WAIT_FACTOR - 1)) + 1
                   else
                     SLOW_SCAN_MIN_WAIT_FACTOR +
-                      ((QUEUE_PROPORTION_EQUILIBRIUM - queue_proportion) /
-                       QUEUE_PROPORTION_EQUILIBRIUM *
+                      ((2 * QUEUE_PROPORTION_EQUILIBRIUM - queue_proportion) /
+                       (2 * QUEUE_PROPORTION_EQUILIBRIUM) *
                        (1 - SLOW_SCAN_MIN_WAIT_FACTOR))
                   end
     wait_factor = [ wait_factor, 1 ].min unless can_slow
