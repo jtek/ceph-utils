@@ -154,7 +154,7 @@ MIN_FILES_BATCH_SIZE = 10
 IGNORE_AFTER_DEFRAG_DELAY = 12 * 3600
 
 MIN_DELAY_BETWEEN_DEFRAGS = 0.02
-# Actually max delay before checking for when to defrag next
+# Actually max delay before checking when to defrag next
 MAX_DELAY_BETWEEN_DEFRAGS = 10
 
 # How often do we dump a status update
@@ -166,7 +166,7 @@ FS_DETECT_PERIOD = 60
 # there were bugs where fatrace would stop report modifications under
 # some conditions (mounts or remounts, fatrace processes per mountpoint and
 # old fatrace version), it might not apply anymore but this doesn't put any
-# measurable strain on the system
+# measurable load on the system and we are unlikely to miss files
 FATRACE_TTL = 24 * 3600 # every day
 # How often do we check the subvolumes list ?
 # it can be costly but undetected subvolumes aren't traversed
@@ -909,10 +909,9 @@ class FilesState
 
   def historize_cost_achievement(file_frag, initial_cost, final_cost, size)
     key = file_frag.majority_compressed? ? :compressed : :uncompressed
-    @cost_achievement_history[key] << [ initial_cost, final_cost, size ]
-    if @cost_achievement_history[key].size > COST_HISTORY_SIZE
-      @cost_achievement_history[key].shift
-    end
+    history = @cost_achievement_history[key]
+    history << [ initial_cost, final_cost, size ]
+    history.shift if history.size > COST_HISTORY_SIZE
     compute_thresholds
     serialize_history
   end
@@ -1880,12 +1879,11 @@ def fatrace_file_writes(devs)
       failed = true
       error "Error in outer fatrace thread: #{ex}"
     end
+    next unless failed
     # Arbitrary sleep to avoid CPU load in case of fatrace repeated failure
-    if failed
-      delay = 60
-      info("Fatrace thread waiting #{delay}s before restart")
-      sleep delay
-    end
+    delay = 60
+    info("Fatrace thread waiting #{delay}s before restart")
+    sleep delay
   end
 end
 
