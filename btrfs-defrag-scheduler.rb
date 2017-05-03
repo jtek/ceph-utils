@@ -375,15 +375,11 @@ module FragmentationCost
   DRIVE_COUNT = $drive_count
 
   def fragmentation_cost(size, seek_time)
-    if (size == 0) || (seek_time == 0)
-      1
-    else
-      # How much time needed to read data
-      # initial seek, sequential read time, seek cost
-      total = seek_delay + (size.to_f / transfer_rate) + seek_time
-      ideal = seek_delay + (size.to_f / transfer_rate)
-      total / ideal
-    end
+    return 1 if size == 0
+    # How much time needed to read data
+    # initial seek, sequential read time, seek cost
+    ideal = seek_delay + (size.to_f / transfer_rate)
+    (ideal + seek_time) / ideal
   end
 
   # Passed offsets are in 4096 blocks
