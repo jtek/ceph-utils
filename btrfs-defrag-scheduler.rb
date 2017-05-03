@@ -130,6 +130,8 @@ TRACKED_WRITTEN_FILES_CONSOLIDATION_PERIOD = 5
 # Default Btrfs commit delay when none is specified
 # it's otherwise parsed from /proc/mounts
 DEFAULT_COMMIT_DELAY = 30
+# How often do we check for defragmentation progress
+STAT_QUEUE_INTERVAL = 10
 # Some files might be written constantly, don't delay passing them to filefrag
 # more than that
 MAX_WRITES_DELAY = 4 * 3600
@@ -579,6 +581,10 @@ class FileFragmentation
         end
       end
     end
+  end
+
+  def fs_commit_delay
+    @btrfs.commit_delay
   end
 
   class << self
@@ -1219,12 +1225,7 @@ class BtrfsDev
     # Tracking of file defragmentation
     @files_in_defragmentation = {}
     @stat_mutex = Mutex.new
-    @stat_thread = Thread.new {
-      loop do
-        handle_stat_queue_progress
-        sleep 5
-      end
-    }
+    @stat_thread = Thread.new { handle_stat_queue_progress }
 
     @slow_scan_thread = Thread.new {
       info("## Beginning files list updater thread for #{dir}")
@@ -1294,30 +1295,36 @@ class BtrfsDev
   end
 
   def handle_stat_queue_progress
-    to_remove = []
-    @stat_mutex.synchronize {
-      @files_in_defragmentation.each { |key,value|
-        last_change = value[:last_change]
-        start = value[:queued_at]
-        if value[:last_cost] == 1.0 ||
-            ((last_change != start) &&
-            ((Time.now - last_change) > 6)) ||
-            (Time.now - start) > 35
-          to_remove << key
-          @files_state.historize_cost_achievement(key, value[:start_cost],
-                                                  value[:last_cost],
-                                                  value[:size])
-        else
-          key.update_fragmentation
-          # if it went up its because of concurrent activity, ignore
-          if key.fragmentation_cost < value[:last_cost]
-            value[:last_cost] = key.fragmentation_cost
-            value[:last_change] = Time.now
+    loop do
+      check_start = Time.now
+      to_remove = []
+      @stat_mutex.synchronize do
+        @files_in_defragmentation.each { |file_frag, value|
+          last_change = value[:last_change]
+          start = value[:queued_at]
+          defrag_time = Time.now - start
+          # Cases where we can stop and register the costs
+          if value[:last_cost] == 1.0 ||
+             (defrag_time >
+              (file_frag.fs_commit_delay + (2 * STAT_QUEUE_INTERVAL)))
+            to_remove << file_frag
+            @files_state.historize_cost_achievement(file_frag, value[:start_cost],
+                                                    value[:last_cost],
+                                                    value[:size])
+          elsif defrag_time > file_frag.fs_commit_delay
+            file_frag.update_fragmentation
+            # if it went up its because of concurrent activity, ignore
+            if file_frag.fragmentation_cost < value[:last_cost]
+              value[:last_cost] = file_frag.fragmentation_cost
+              value[:last_change] = Time.now
+            end
           end
-        end
-      }
-      to_remove.each { |frag| @files_in_defragmentation.delete(frag) }
-    }
+        }
+        to_remove.each { |frag| @files_in_defragmentation.delete(frag) }
+      end
+      wait = (check_start + STAT_QUEUE_INTERVAL) - Time.now
+      sleep wait if wait > 0
+    end
   end
 
   def claim_file_write(filename)
