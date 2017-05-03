@@ -1044,40 +1044,45 @@ class FilesState
   def thresholds_expired?
     @last_thresholds_at < (Time.now - COST_COMPUTE_DELAY)
   end
+  # each achievement is [ initial_cost, final_cost, file_size ]
+  # file_size is currently ignored (the target was jumping around on filesystems
+  # with very diverse file sizes)
   def compute_thresholds
     return unless thresholds_expired?
     TYPES.each { |key|
       size = @cost_achievement_history[key].size
       # We want a weighted percentile, higher weight for more recent costs
-      threshold_weight = 0
-      # This is now weighted and can't be computed from the size
-      @cost_achievement_history[key].each_with_index { |costs, index|
-        threshold_weight = costs[2] * (index + 1)
-      }
+      threshold_weight = ((size + 1) * size) / 2
+      # If we used the file size:
+      # @cost_achievement_history[key].each_with_index { |costs, index|
+      #   threshold_weight = costs[2] * (index + 1)
+      # }
       threshold_weight *= (COST_THRESHOLD_PERCENTILE.to_f / 100)
+      # Order by final_cost, transform weight to be between 1 and size
       ordered_history =
-      @cost_achievement_history[key].each_with_index.map { |costs,index|
+        @cost_achievement_history[key].each_with_index.map { |costs, index|
         [ costs, index + 1 ]
-      }.sort_by { |a| a[0][1] } # order by final cost
+      }.sort_by { |a| a[0][1] }
       total_weight = 0
       final_accu = 0
       initial_accu = 0
-      result = [ 1, 1 ] # default if no cost found
+      cost_achievement = [ 1, 1 ] # default if no cost found
       # This will stop as soon as we reach the percentile
       while total_weight < threshold_weight
-        result, weight = ordered_history.shift
-        initial_accu += result[0] * result[2] * weight
-        final_accu += result[1] * result[2] * weight
-        total_weight += result[2] * weight
+        cost_achievment, weight = ordered_history.shift
+        initial_accu += cost_achievement[0] * weight
+        final_accu += cost_achievement[1] * weight
+        total_weight += weight
       end
       # Percentile reached
-      @cost_thresholds[key] = [ result[1], MIN_FRAGMENTATION_THRESHOLD ].max
-      # Continue with the rest
+      @cost_thresholds[key] =
+        [ cost_achievement[1], MIN_FRAGMENTATION_THRESHOLD ].max
+      # Continue with the rest to compute other stats
       while ordered_history.any?
-        result, weight = ordered_history.shift
-        initial_accu += result[0] * result[2] * weight
-        final_accu += result[1] * result[2] * weight
-        total_weight += result[2] * weight
+        cost_achievement, weight = ordered_history.shift
+        initial_accu += cost_achievement[0] * weight
+        final_accu += cost_achievement[1] * weight
+        total_weight += weight
       end
       @average_costs[key] = final_accu / total_weight
       @initial_costs[key] = initial_accu / total_weight
