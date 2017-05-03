@@ -109,8 +109,6 @@ RECENT_SERIALIZE_DELAY = 120
 # How many files do we queue for defragmentation
 MAX_QUEUE_LENGTH = 500
 QUEUE_PROPORTION_EQUILIBRIUM = 0.1
-# How much do we slow defragmentation frequency when the queue is empty
-SPEED_FACTOR_WITH_EMPTY_QUEUE = 0.2
 # How much device time the program is allowed to use
 # (values when queue == MAX_QUEUE_LENGTH)
 # time window => max_device_use_ratio
