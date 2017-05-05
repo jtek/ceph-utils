@@ -1624,17 +1624,28 @@ class BtrfsDev
   def compute_slow_scan_delay
     # Count time spent processing a batch to compensate for it
     previous_batch_duration = Time.now - @last_slow_scan_batch_start
+    # Take the minimum sleep after batch into account
+    previous_batch_interval =
+      previous_batch_duration + MIN_DELAY_BETWEEN_FILEFRAGS
     factor = wait_factor
-    min_interval = scan_time_left * MIN_FILES_BATCH_SIZE /
-                   @slow_scan_expected_left
+    largest_interval = scan_time_left * MIN_FILES_BATCH_SIZE /
+                       @slow_scan_expected_left
+    target_interval = largest_interval * factor
     # If we can't keep up, first increase batch size
-    if (min_interval * factor) < previous_batch_duration
-      $slow_batch_size = ((MIN_FILES_BATCH_SIZE * previous_batch_duration) /
-                          (min_interval * factor)).ceil
-    end
-    $slow_batch_size = [ $slow_batch_size, MAX_FILES_BATCH_SIZE ].compact.min
+    @slow_batch_size =
+      if target_interval >=
+         (previous_batch_interval *
+          MIN_FILES_BATCH_SIZE / @slow_batch_size)
+        # Current load allows to reduce to the minimum
+        MIN_FILES_BATCH_SIZE
+      else
+        ((MIN_FILES_BATCH_SIZE * previous_batch_interval) /
+         target_interval).ceil
+      end
+    # Cap batch size
+    @slow_batch_size = [ @slow_batch_size, MAX_FILES_BATCH_SIZE ].min
     # Compute target delay
-    delay = scan_time_left * $slow_batch_size / @slow_scan_expected_left
+    delay = scan_time_left * @slow_batch_size / @slow_scan_expected_left
     # Sleep to target the compensated delay
     [ [ (delay * factor) - previous_batch_duration,
         MIN_DELAY_BETWEEN_FILEFRAGS ].max,
