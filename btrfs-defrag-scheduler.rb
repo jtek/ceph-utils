@@ -1303,8 +1303,7 @@ class BtrfsDev
       @stat_mutex.synchronize do
         @files_in_defragmentation.each { |file_frag, value|
           last_change = value[:last_change]
-          start = value[:queued_at]
-          defrag_time = Time.now - start
+          defrag_time = Time.now - value[:queued_at]
           # Cases where we can stop and register the costs
           if value[:last_cost] == 1.0 ||
              (defrag_time >
@@ -1450,7 +1449,7 @@ class BtrfsDev
     @next_slow_status_at ||= Time.now
     # Target a batch size for MIN_DELAY_BETWEEN_FILEFRAGS interval between
     # filefrag calls
-    update_slow_batch_size
+    init_slow_batch_size
     begin
       Find.find(dir) do |path|
         slow_status(start, queued, count, already_processed, recent)
@@ -1664,7 +1663,7 @@ class BtrfsDev
     wait_factor
   end
 
-  def update_slow_batch_size
+  def init_slow_batch_size
     @slow_batch_size = [ ((MIN_DELAY_BETWEEN_FILEFRAGS.to_f *
                            @slow_scan_expected_left) /
                           scan_time_left).ceil,
