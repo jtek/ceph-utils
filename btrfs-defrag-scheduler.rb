@@ -1075,7 +1075,7 @@ class FilesState
       cost_achievement = [ 1, 1 ] # default if no cost found
       # This will stop as soon as we reach the percentile
       while total_weight < threshold_weight
-        cost_achievment, weight = ordered_history.shift
+        cost_achievement, weight = ordered_history.shift
         initial_accu += cost_achievement[0] * weight
         final_accu += cost_achievement[1] * weight
         total_weight += weight
