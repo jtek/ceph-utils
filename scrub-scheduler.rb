@@ -20,7 +20,7 @@ SCRUB_TARGET_PERIOD = 24 * 3600          # 1 day
 DELAY_WHEN_UNSYNCED = 60                 # 1 minute before checking again
 MAX_PARALLEL_DEEP_SCRUBS = 2
 MAX_PARALLEL_SCRUBS = 4
-ADMIN_MAIL = "lionel.bouton@jtek.fr"
+ADMIN_MAIL = "root@localhost"
 # Assume we get 1/10 of the disk rate (used to delay concurrent activity)
 REPAIR_BYTE_RATE = 100_000_000 / 10
 
