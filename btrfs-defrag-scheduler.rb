@@ -10,7 +10,7 @@ def help_exit
   print <<EOMSG
 Usage: #{script_name} [ options ]
 
-Recognised options:
+Recognized options:
 
 --help (-h)
     This message
