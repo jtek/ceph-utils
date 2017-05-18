@@ -860,14 +860,12 @@ class FilesState
     @writes_mutex.synchronize { @written_files.delete(shortname) }
   end
 
-  def update_files(file_fragmentations, threshold_multiplier = nil)
+  def update_files(file_fragmentations)
     return 0 unless file_fragmentations.any?
     updated_names = file_fragmentations.map(&:short_filename)
     duplicate_names = []
     # Remove files we won't consider anyway
-    file_fragmentations.reject! do |frag|
-      below_threshold_cost(frag, threshold_multiplier)
-    end
+    file_fragmentations.reject! { |frag| below_threshold_cost(frag) }
     @fragmentation_info_mutex.synchronize {
       # Remove duplicates and compute duplicate names
       TYPES.each { |type|
@@ -926,10 +924,8 @@ class FilesState
     @average_costs[type]
   end
 
-  def below_threshold_cost(frag, threshold_multiplier = nil)
-    limit = threshold_cost(frag)
-    limit = ((limit - 1) * threshold_multiplier) + 1 if threshold_multiplier
-    frag.fragmentation_cost <= limit
+  def below_threshold_cost(frag)
+    frag.fragmentation_cost <= threshold_cost(frag)
   end
 
   def type_track(types)
@@ -998,9 +994,9 @@ class FilesState
     @writes_mutex.synchronize {
       batch.each { |shortname| @written_files.delete(shortname) }
     }
-    update_files(FileFragmentation.batch_init(to_check, @btrfs),
-                 fatrace_threshold_multiplier)
-    # Cleanup written_files if it overflows, moving files to the defragmentation queue
+    update_files(FileFragmentation.batch_init(to_check, @btrfs))
+    # Cleanup written_files if it overflows, moving files to the defragmentation
+    # queue
     to_check = []
     @writes_mutex.synchronize {
       if @written_files.size > MAX_TRACKED_WRITTEN_FILES
@@ -1017,8 +1013,7 @@ class FilesState
           MAX_TRACKED_WRITTEN_FILES ]
       end
     }
-    update_files(FileFragmentation.batch_init(to_check, @btrfs),
-                 fatrace_threshold_multiplier)
+    update_files(FileFragmentation.batch_init(to_check, @btrfs))
     @last_writes_consolidated_at = Time.now
   end
 
@@ -1098,15 +1093,6 @@ class FilesState
       @initial_costs[key] = initial_accu / total_weight
     }
     @last_thresholds_at = Time.now
-  end
-  def fatrace_threshold_multiplier
-    # fatrace is used to detect heavily fragmented files early
-    # The longer we wait after defrag, the lower the multiplier:
-    # each file defragmented because fatrace bring as much benefit than
-    # a file defragmented because of the slow scan
-    # [ (SLOW_SCAN_PERIOD.to_f / IGNORE_AFTER_DEFRAG_DELAY) / 2, 1 ].max
-    # The value above missed most of the files, use a constant for now
-    4
   end
   def must_serialize_history?
     @last_history_serialized_at < (Time.now - HISTORY_SERIALIZE_DELAY)
