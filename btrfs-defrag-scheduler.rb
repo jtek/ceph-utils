@@ -133,6 +133,9 @@ TRACKED_WRITTEN_FILES_CONSOLIDATION_PERIOD = 5
 DEFAULT_COMMIT_DELAY = 30
 # How often do we check for defragmentation progress
 STAT_QUEUE_INTERVAL = 10
+# Fragmentation information isn't available right after the last write or even
+# commit (as in commit_delay of the filesystem)
+FRAGMENTATION_INFO_DELAY_FACTOR = 4
 # Some files might be written constantly, don't delay passing them to filefrag
 # more than that
 MAX_WRITES_DELAY = 4 * 3600
@@ -625,7 +628,7 @@ class WriteEvents
   def ready_for_frag_check?(commit_delay)
     now = Time.now
     # We add a small delay to account for unexpected latencies
-    after_write_delay = commit_delay + 5
+    after_write_delay = commit_delay * FRAGMENTATION_INFO_DELAY_FACTOR
     (last < (now - after_write_delay - fuzzy_delay)) ||
       (first < (now - MAX_WRITES_DELAY))
   end
