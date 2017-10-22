@@ -14,7 +14,7 @@ CHOICE_WINDOW_PROPORTION = 0.10
 # the automatic deep scrubs to collide with the scheduled ones. This allows pauses
 # in scrubbing for up to one week in a 2 week window, which make rebalancing events
 # easier to handle
-DEEP_SCRUB_TARGET_PERIOD = 7 * 24 * 3600 # 1 week
+DEEP_SCRUB_TARGET_PERIOD = 14 * 24 * 3600 # 2 weeks
 # Set "osd scrub min interval" to 2 days in ceph.conf
 SCRUB_TARGET_PERIOD = 24 * 3600          # 1 day
 DELAY_WHEN_UNSYNCED = 60                 # 1 minute before checking again
