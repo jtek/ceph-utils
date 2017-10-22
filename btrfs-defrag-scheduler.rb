@@ -1849,6 +1849,8 @@ class BtrfsDevs
   def known?(dir)
     dev_id = File.stat(dir).dev
     @btrfs_devs.any? { |btrfs_dev| btrfs_dev.has_dev?(dev_id) }
+  rescue
+    true # if File.stat failed, this is a race condition with a concurrent umount
   end
 end
 
