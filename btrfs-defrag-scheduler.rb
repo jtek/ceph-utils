@@ -1449,8 +1449,9 @@ class BtrfsDev
           # ignore files with unparsable names
           short_name = short_filename(path) rescue ""
           next if short_name == ""
-          # Only process file entries
-          next if File.exists?(path) && !File.file?(path)
+          # Only process file entries (File.file? is true for symlinks)
+          next unless File.exists?(path)
+          next if !File.file?(path) || File.symlink?(path)
           count += 1
           # Don't process during a resume
           next if first_pass && (count < @last_processed)
