@@ -233,7 +233,7 @@ Thread.abort_on_exception = true
 module HashEntrySerializer
   def serialize_entry(key, value, file)
     FileUtils.mkdir_p(File.dirname(file))
-    File.open(file, File::RDWR|File::CREAT, 0644) { |f|
+    File.open(file, File::RDWR|File::CREAT|File::BINARY, 0644) { |f|
       f.flock(File::LOCK_EX)
       yaml = f.read
       hash = yaml.empty? ? {} : YAML.load(yaml) rescue {}
@@ -247,7 +247,7 @@ module HashEntrySerializer
 
   def unserialize_entry(key, file, op_id, default_value = nil)
     if File.file?(file)
-      File.open(file, File::RDONLY) { |f|
+      File.open(file, 'r:ascii-8bit') { |f|
         f.flock(File::LOCK_EX)
         yaml = f.read
         hash = yaml.empty? ? {} : YAML.load(yaml) rescue {}
@@ -729,7 +729,8 @@ class FilesState
          ((serialized_data["bitarray"].size * ENTRIES_PER_BYTE) != MAX_ENTRIES)
         dump = serialized_data && serialized_data.reject{|k,v| k == "bitarray"}
         error "Invalid serialized data: \n#{dump.inspect}"
-        @bitarray = "\0" * (MAX_ENTRIES / ENTRIES_PER_BYTE)
+        @bitarray =
+          "\0".force_encoding(Encoding::ASCII_8BIT) * (MAX_ENTRIES / ENTRIES_PER_BYTE)
         @last_tick = Time.now
         @size = 0
         return
@@ -737,6 +738,7 @@ class FilesState
       @bitarray = serialized_data["bitarray"]
       @last_tick = serialized_data["last_tick"]
       @size = serialized_data["size"]
+      @bitarray.force_encoding(Encoding::ASCII_8BIT)
     end
 
     # Expects a string
