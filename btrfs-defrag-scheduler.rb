@@ -1626,10 +1626,19 @@ class BtrfsDev
     return delay || DEFAULT_COMMIT_DELAY
   end
 
+  # Reading /proc/mounts can sometime be long: avoid doing it too much
   def mount_line
-    File.read("/proc/mounts").lines.reverse.find { |line|
+    return @mount_line if mount_line_recent?
+    @mount_line = File.read("/proc/mounts").lines.reverse.find do |line|
       line.match(/\S+\s#{dir}\s/)
-    }
+    end
+    @mount_line_fetched_at = Time.now
+    @mount_line
+  end
+
+  def mount_line_recent?
+    @mount_line_fetched_at &&
+      @mount_line_fetched_at > (Time.now - (FS_DETECT_PERIOD / 2))
   end
 
   def mount_options
