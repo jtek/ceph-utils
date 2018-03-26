@@ -1897,8 +1897,11 @@ class BtrfsDevs
 
   def update!
     # Enumerate BTRFS filesystems, avoid autodefrag ones
-    dirs = IO.popen("grep btrfs /proc/mounts | grep -v autodefrag | " +
-                    "awk '{ print $2 }'") { |io| io.readlines.map(&:chomp) }
+    dirs = File.open("/proc/mounts", "r") do |f|
+      f.readlines.map { |line| line.split(' ') }
+        .select { |ary| ary[2] == 'btrfs' }
+        .reject { |ary| ary[3].match(/autodefrag/) }
+    end.map { |ary| ary[1] }
     dev_fs_map = Hash.new { |hash, key| hash[key] = Set.new }
     dirs.each { |dir| dev_fs_map[File.stat(dir).dev] << dir }
     @lock.synchronize do
