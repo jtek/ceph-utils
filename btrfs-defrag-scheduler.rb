@@ -35,6 +35,11 @@ Recognized options:
 
 --drive-count <value> (-c)
     number of 7200rpm drives behind the filesystem (1)
+
+--ignore-load (-i)
+    by default the scheduler slows down if the system load is greater than the
+    number of processors it detects (warning: setting CPU affinity for the
+    scheduler  will artificially reduce this number)
 EOMSG
   exit
 end
@@ -42,6 +47,7 @@ end
 opts = GetoptLong.new([ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
                       [ '--verbose', '-v', GetoptLong::NO_ARGUMENT ],
                       [ '--debug', '-d', GetoptLong::NO_ARGUMENT ],
+                      [ '--ignore-load', '-i', GetoptLong::NO_ARGUMENT ],
                       [ '--full-scan-time', '-s',
                         GetoptLong::REQUIRED_ARGUMENT ],
                       [ '--target-extent-size', '-t',
@@ -57,6 +63,7 @@ opts = GetoptLong.new([ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
 $default_extent_size = '32M'
 $verbose = false
 $debug = false
+$ignore_load = false
 $speed_multiplier = 1.0
 $drive_count = 1
 slow_start = 600
@@ -83,6 +90,8 @@ opts.each do |opt,arg|
   when '--drive-count'
     $drive_count = arg.to_f
     $drive_count = 1 if $drive_count < 1
+  when '--ignore_load'
+    $ignore_load = true
   end
 end
 
@@ -251,6 +260,47 @@ module HashEntrySerializer
       default_value
     end
   end
+end
+
+# Thread-safe load checker (won't check load more than once per period
+# accross all threads)
+class LoadCheck
+  require 'singleton'
+  require 'etc'
+  include Singleton
+
+  # 10 seconds seems small enough to detect changes with real-life impacts
+  LOAD_VALIDITY_PERIOD = 10
+
+  def initialize
+    @load_updater_mutex = Mutex.new
+    update_load
+  end
+
+  def load_ratio
+    update_load_if_needed
+    @load_ratio
+  end
+
+  private
+
+  def update_load_if_needed
+    @load_updater_mutex.synchronize do
+      break if @last_load_update > (Time.now - LOAD_VALIDITY_PERIOD)
+      update_load
+    end
+  end
+
+  def update_load
+    # Warning Etc.nprocessors is restricted by CPU affinity
+    @load_ratio = cpu_load / Etc.nprocessors
+    @last_load_update = Time.now
+  end
+
+  def cpu_load
+    File.read('/proc/loadavg').split(' ')[0].to_f
+  end
+
 end
 
 # Limit disk available bandwidth usage
@@ -1714,8 +1764,15 @@ class BtrfsDev
     proportional_delay =
       @files_state.queue_fill_proportion / QUEUE_PROPORTION_EQUILIBRIUM *
       (MAX_DELAY_BETWEEN_DEFRAGS - MIN_DELAY_BETWEEN_DEFRAGS)
-    [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
-      MIN_DELAY_BETWEEN_DEFRAGS ].max
+    bounded_delay = [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
+                      MIN_DELAY_BETWEEN_DEFRAGS ].max
+    return bounded_delay if $ignore_load
+    current_load_ratio = LoadCheck.instance.load_ratio
+    return bounded_delay if current_load_ratio <= 1
+    adjusted_delay = bounded_delay * current_load_ratio
+    info "Slowing down (%.2fs) due to high load (%d%%)" %
+         [ adjusted_delay, (current_load_ratio * 100) ]
+    adjusted_delay
   end
 
   def delay_until_available_for_defrag(min_delay)
