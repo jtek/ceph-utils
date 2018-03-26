@@ -1082,18 +1082,30 @@ class FilesState
         "%.2f" % @file_fragmentations[:uncompressed][0].fragmentation_cost :
         "none"
     }
-    info(("# #{@btrfs.dirname} c: %.1f%%; " \
-          "Queued (c/u): %d/%d " \
-          "C: %.2f-%.2f,q:%s,t:%.2f " \
-          "U: %.2f-%.2f,q:%s,t:%.2f " \
-          "flw: %d; recent: %d") %
-         [ type_share(:compressed) * 100,
-           queue_size(:compressed), queue_size(:uncompressed),
-           @initial_costs[:compressed], @average_costs[:compressed],
-           last_compressed_cost, @cost_thresholds[:compressed],
-           @initial_costs[:uncompressed], @average_costs[:uncompressed],
-           last_uncompressed_cost, @cost_thresholds[:uncompressed],
-           @written_files.size, @recently_defragmented.size ])
+    display_compressed =
+      @cost_achievement_history[:compressed].size <= (COST_HISTORY_SIZE / 100)
+    if display_compressed
+      info(("# #{@btrfs.dirname} c: %.1f%%; " \
+            "Queued (c/u): %d/%d " \
+            "C: %.2f-%.2f,q:%s,t:%.2f " \
+            "U: %.2f-%.2f,q:%s,t:%.2f " \
+            "flw: %d; recent: %d") %
+           [ type_share(:compressed) * 100,
+             queue_size(:compressed), queue_size(:uncompressed),
+             @initial_costs[:compressed], @average_costs[:compressed],
+             last_compressed_cost, @cost_thresholds[:compressed],
+             @initial_costs[:uncompressed], @average_costs[:uncompressed],
+             last_uncompressed_cost, @cost_thresholds[:uncompressed],
+             @written_files.size, @recently_defragmented.size ])
+    else
+      info(("# #{@btrfs.dirname} (no_comp); " \
+            "Queued: %d %.2f-%.2f,q:%s,t:%.2f " \
+            "flw: %d; recent: %d") %
+           [ queue_size(:uncompressed),
+             @initial_costs[:uncompressed], @average_costs[:uncompressed],
+             last_uncompressed_cost, @cost_thresholds[:uncompressed],
+             @written_files.size, @recently_defragmented.size ])
+    end
     @next_status_at += STATUS_PERIOD while Time.now > @next_status_at
   end
 
@@ -1297,10 +1309,14 @@ class BtrfsDev
       info "## #{dir}: probably umounted"
       return
     end
-    if @compressed != compressed
+    if @compression_algo != compression_algorithm
       changed = true
-      @compressed = compressed
-      info "## #{dir}: compressed mount is now #{@compressed ? 'on' : 'off'}"
+      @compression_algo = compression_algorithm
+      if @compression_algo
+        info "## #{dir}: now using compression #{@compression_algo}"
+      else
+        info "## #{dir}: compression disabled"
+      end
     end
     commit_delay = parse_commit_delay
     if @commit_delay != commit_delay
@@ -1443,7 +1459,7 @@ class BtrfsDev
     return @defrag_cmd if @defrag_cmd
     cmd =
       [ "btrfs", "filesystem", "defragment", "-t", $default_extent_size, "-f" ]
-    cmd << "-czlib" if @compressed
+    cmd << "-c#{@compression_algo}" if @compression_algo
     @defrag_cmd = cmd
   end
 
@@ -1580,10 +1596,21 @@ class BtrfsDev
   def mounted_with_compress?
     options = mount_options
     return nil unless options
-    !options.split(',').detect { |option|
-      [ "compress=lzo", "compress=zlib",
-        "compress-force=lzo", "compress-force=zlib" ].include?(option)
-    }.nil?
+    options.split(',').all? do |option|
+      !(option.start_with?("compress=") ||
+        option.start_with?("compress-force="))
+    end
+  end
+
+  def compression_algorithm
+    options = mount_options
+    return nil unless options
+    compress_option = options.split(',').detect do |option|
+      option.start_with?("compress=") ||
+        option.start_with?("compress-force=")
+    end
+    return nil unless compress_option
+    compress_option.split('=')[1]
   end
 
   def parse_commit_delay
