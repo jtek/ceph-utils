@@ -1083,7 +1083,7 @@ class FilesState
         "none"
     }
     display_compressed =
-      @cost_achievement_history[:compressed].size <= (COST_HISTORY_SIZE / 100)
+      @cost_achievement_history[:compressed].size > (COST_HISTORY_SIZE / 100)
     if display_compressed
       info(("# #{@btrfs.dirname} c: %.1f%%; " \
             "Queued (c/u): %d/%d " \
