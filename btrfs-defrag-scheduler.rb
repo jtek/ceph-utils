@@ -150,7 +150,7 @@ MAX_WRITES_DELAY = 4 * 3600
 
 # Full refresh of fragmentation information on files happens in
 # (pass number of hours on commandline if the default is not wanted)
-SLOW_SCAN_PERIOD = (scan_time || 7 * 24) * 3600 # 1 week
+SLOW_SCAN_PERIOD = (scan_time || 4 * 7 * 24) * 3600 # 1 month
 SLOW_SCAN_CATCHUP_WAIT = slow_start
 SLOW_SCAN_MAX_WAIT_FACTOR = 100
 SLOW_SCAN_MIN_WAIT_FACTOR = 0.8
