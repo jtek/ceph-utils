@@ -1,5 +1,4 @@
 #!/usr/bin/ruby
-# coding: utf-8
 
 require 'getoptlong'
 require 'set'
@@ -20,7 +19,7 @@ Recognized options:
     defaults to 7 x 24 = 1 week
 
 --target-extent-size <value> (-t)
-    value passed to btrfs filesystem defrag « -t » parameter (32M)
+    value passed to btrfs filesystem defrag "-t" parameter (32M)
 
 --verbose (-v)
     prints defragmention as it happens
@@ -1032,10 +1031,10 @@ class FilesState
         "none"
     }
     info(("# #{@btrfs.dirname} c: %.1f%%; " \
-           "Queued (c/u): %d/%d " \
-           "C: %.2f→%.2f,q:%s,t:%.2f " \
-           "U: %.2f→%.2f,q:%s,t:%.2f " \
-           "flw: %d; recent: %d") %
+          "Queued (c/u): %d/%d " \
+          "C: %.2f-%.2f,q:%s,t:%.2f " \
+          "U: %.2f-%.2f,q:%s,t:%.2f " \
+          "flw: %d; recent: %d") %
          [ type_share(:compressed) * 100,
            queue_size(:compressed), queue_size(:uncompressed),
            @initial_costs[:compressed], @average_costs[:compressed],
