@@ -107,8 +107,8 @@ end
 COST_HISTORY_SIZE = 2000
 # Tune this to change the effort made to defragment (1.0: max effort)
 MIN_FRAGMENTATION_THRESHOLD = 1.05
-# Warning, can try to defragment many files that can't bedefragmented if set too
-# low (lowered from 50 to 33 because some filesystems have files difficult to
+# Warning, can try to defragment many files that can't be defragmented if set
+# too (lowered from 50 to 33 because some filesystems have files difficult to
 # defragment which prevents others to be defragmented)
 COST_THRESHOLD_PERCENTILE = 33
 COST_COMPUTE_DELAY = 60
