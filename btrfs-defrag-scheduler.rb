@@ -1522,6 +1522,10 @@ class BtrfsDev
           count += 1
           # Don't process during a resume
           next if first_pass && (count < @last_processed)
+          if first_pass
+            info "Caught up #{@last_processed} files"
+            first_pass = false
+          end
           # Ignore recently processed files
           if @files_state.recently_defragmented?(short_name)
             already_processed += 1
