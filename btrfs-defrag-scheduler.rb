@@ -121,6 +121,7 @@ QUEUE_PROPORTION_EQUILIBRIUM = 0.1
 # How much device time the program is allowed to use
 # (values when queue == MAX_QUEUE_LENGTH)
 # time window => max_device_use_ratio
+# When adapting to load, time windows are enlarged when load is above "normal"
 DEVICE_USE_LIMITS = {
   0.5 => 0.5 * $speed_multiplier,
   3 => 0.45 * $speed_multiplier,
@@ -277,8 +278,16 @@ class LoadCheck
     update_load
   end
 
+  # We don't slow down until load_ratio > 1
+  def slowdown_ratio
+    return 1 if $ignore_load
+    [ load_ratio, 1 ].max
+  end
+
   def load_ratio
     update_load_if_needed
+    # Note: not protected by mutex because Ruby concurrent access semantics
+    # don't allow this object to have transient invalid values
     @load_ratio
   end
 
@@ -286,8 +295,7 @@ class LoadCheck
 
   def update_load_if_needed
     @load_updater_mutex.synchronize do
-      break if @last_load_update > (Time.now - LOAD_VALIDITY_PERIOD)
-      update_load
+      update_load if @last_load_update <= (Time.now - LOAD_VALIDITY_PERIOD)
     end
   end
 
@@ -351,7 +359,9 @@ class UsagePolicyChecker
   private
 
   def cleanup
-    largest_window = DEVICE_USE_LIMITS.keys.max
+    # Adapt period to current load, keep a buffer to anticipate rise in load
+    largest_window =
+      DEVICE_USE_LIMITS.keys.max * LoadCheck.instance.slowdown_ratio * 2
     this_start = Time.now
     # Cleanup the device uses
     @device_uses.shift while (first = @device_uses.first) &&
@@ -362,9 +372,11 @@ class UsagePolicyChecker
     now = Time.now
     return now + min_delay if window <= min_delay
     target = DEVICE_USE_LIMITS[window]
+    slowdown = LoadCheck.instance.slowdown_ratio
+    max_delay = window * slowdown
     # When will it reach the target use_ratio ?
-    return now + dichotomy((min_delay..window), target, 0.001) do |wait|
-      use_ratio(now + wait - window, window, expected_time)
+    return now + dichotomy((min_delay..max_delay), target, 0.001) do |wait|
+      use_ratio(now + wait - max_delay, max_delay, expected_time)
     end
   end
 
@@ -1808,12 +1820,11 @@ class BtrfsDev
       (MAX_DELAY_BETWEEN_DEFRAGS - MIN_DELAY_BETWEEN_DEFRAGS)
     bounded_delay = [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
                       MIN_DELAY_BETWEEN_DEFRAGS ].max
-    return bounded_delay if $ignore_load
-    current_load_ratio = LoadCheck.instance.load_ratio
-    return bounded_delay if current_load_ratio <= 1
-    adjusted_delay = bounded_delay * current_load_ratio
+    slowdown = LoadCheck.instance.slowdown_ratio
+    return bounded_delay if slowdown == 1
+    adjusted_delay = bounded_delay * slowdown
     info "Slowing down (%.2fs) due to high load (%d%%)" %
-         [ adjusted_delay, (current_load_ratio * 100) ]
+         [ adjusted_delay, (slowdown * 100) ]
     adjusted_delay
   end
 
