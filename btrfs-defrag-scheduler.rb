@@ -191,6 +191,7 @@ SUBVOL_TTL = 3600
 
 # System dependent (reserve 100 for cmd and 4096 for one path entry)
 FILEFRAG_ARG_MAX = 131072 - 100 - 4096
+FILEFRAG_ARGCOUNT_MAX = 50
 
 # Where do we serialize our data
 STORE_DIR        = "/root/.btrfs_defrag"
@@ -657,19 +658,31 @@ class FileFragmentation
   class << self
     def batch_init(filelist, btrfs)
       frags = []
-      return frags if filelist.empty?
-      IO.popen([ "filefrag", "-v" ] + filelist) do |io|
-        parser = FilefragParser.new
-        while line = io.gets do
-          line.chomp!
-          parser.add_line(line)
-          if parser.eof?
-            frags << parser.file_fragmentation(btrfs)
-            parser.reinit
+      until filelist.empty?
+        files = filelist[0...FILEFRAG_ARGCOUNT_MAX]
+        filelist = filelist[FILEFRAG_ARGCOUNT_MAX..-1] || []
+        frags += batch_step(files, btrfs)
+      end
+      btrfs.track_compress_type(frags.map(&:compress_type)) if frags.any?
+      frags
+    end
+
+    def batch_step(files, btrfs)
+      sleep btrfs.delay_until_available_for_filefrag
+      frags = []
+      btrfs.run_with_device_usage do
+        IO.popen([ "filefrag", "-v" ] + files) do |io|
+          parser = FilefragParser.new
+          while line = io.gets do
+            line.chomp!
+            parser.add_line(line)
+            if parser.eof?
+              frags << parser.file_fragmentation(btrfs)
+              parser.reinit
+            end
           end
         end
       end
-      btrfs.track_compress_type(frags.map(&:compress_type))
       frags
     end
   end
@@ -1040,18 +1053,19 @@ class FilesState
     batch = []
     to_check = []
     args_length = 0
+    args_count = 0
     @writes_mutex.synchronize {
-      @written_files.each do |shortname,value|
-        if value.ready_for_frag_check?(@btrfs.commit_delay)
-          batch << shortname
-          fullname = @btrfs.full_filename(shortname)
-          next unless File.file?(fullname)
-          to_check << fullname
-          args_length += fullname.size + 1
-          # We must limit the argument length (the rest will be processed
-          # during a future call)
-          break if args_length >= FILEFRAG_ARG_MAX
-        end
+      @written_files.each do |shortname, value|
+        next unless value.ready_for_frag_check?(@btrfs.commit_delay)
+        batch << shortname
+        fullname = @btrfs.full_filename(shortname)
+        next unless File.file?(fullname)
+        to_check << fullname
+        args_length += fullname.size + 1
+        args_count += 1
+        # We must limit the argument length (the rest will be processed
+        # during a future call)
+        break if args_length >= FILEFRAG_ARG_MAX
       end
     }
     # We remove them from @written_files because update_files filters
@@ -1494,6 +1508,18 @@ class BtrfsDev
     @files_state.type_track(compress_types)
   end
 
+  def run_with_device_usage
+    start = Time.now
+    result = yield
+    @checker.add_usage(start, Time.now)
+    return result
+  end
+
+  def delay_until_available_for_filefrag
+    [ @checker.available_at(@files_state.queue_fill_proportion) - Time.now,
+      0 ].max
+  end
+
   private
   # Slowly update files, targeting a SLOW_SCAN_PERIOD period for all updates
   def slow_files_state_update(first_pass: false)
@@ -1602,13 +1628,6 @@ class BtrfsDev
 
   def skip_defrag?(filename)
     filename.end_with?(" (deleted)") || blacklisted?(filename)
-  end
-
-  def run_with_device_usage
-    start = Time.now
-    result = yield
-    @checker.add_usage(start, Time.now)
-    return result
   end
 
   def mounted_with_compress?
