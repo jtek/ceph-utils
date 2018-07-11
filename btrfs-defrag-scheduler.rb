@@ -86,7 +86,7 @@ opts.each do |opt,arg|
     $speed_multiplier = 1.0 if $speed_multiplier <= 0
   when '--slow-start'
     slow_start = arg.to_i
-    slow_start = 600 if slow_start <= 0
+    slow_start = 600 if slow_start < 0
   when '--drive-count'
     $drive_count = arg.to_f
     $drive_count = 1 if $drive_count < 1
