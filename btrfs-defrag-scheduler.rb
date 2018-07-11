@@ -117,6 +117,8 @@ RECENT_SERIALIZE_DELAY = 120
 
 # How many files do we queue for defragmentation
 MAX_QUEUE_LENGTH = 500
+# What is our target queue length proportion where our speed is nominal
+# (speedup above it, slowdown under it)
 QUEUE_PROPORTION_EQUILIBRIUM = 0.1
 # How much device time the program is allowed to use
 # (values when queue == MAX_QUEUE_LENGTH)
@@ -145,8 +147,8 @@ STAT_QUEUE_INTERVAL = 10
 # Fragmentation information isn't available right after the last write or even
 # commit (as in commit_delay of the filesystem)
 FRAGMENTATION_INFO_DELAY_FACTOR = 4
-# Some files might be written constantly, don't delay passing them to filefrag
-# more than that
+# Some files might be written to constantly, don't delay passing them to
+# filefrag more than that
 MAX_WRITES_DELAY = 4 * 3600
 
 # Full refresh of fragmentation information on files happens in
@@ -1054,14 +1056,14 @@ class FilesState
     }
     # We remove them from @written_files because update_files filters
     # according to its content
-    @writes_mutex.synchronize {
+    @writes_mutex.synchronize do
       batch.each { |shortname| @written_files.delete(shortname) }
-    }
+    end
     update_files(FileFragmentation.batch_init(to_check, @btrfs))
     # Cleanup written_files if it overflows, moving files to the defragmentation
     # queue
     to_check = []
-    @writes_mutex.synchronize {
+    @writes_mutex.synchronize do
       if @written_files.size > MAX_TRACKED_WRITTEN_FILES
         to_remove = @written_files.size - MAX_TRACKED_WRITTEN_FILES
         @written_files.keys.sort_by { |short|
@@ -1075,7 +1077,7 @@ class FilesState
           [ @btrfs.dirname, to_remove + MAX_TRACKED_WRITTEN_FILES,
           MAX_TRACKED_WRITTEN_FILES ]
       end
-    }
+    end
     update_files(FileFragmentation.batch_init(to_check, @btrfs))
     @last_writes_consolidated_at = Time.now
   end
