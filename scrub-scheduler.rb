@@ -10,13 +10,13 @@ CEPH_EXE = "ceph"
 # Proportion of PG used to choose next candidate (with oldest deep-scrubs)
 CHOICE_WINDOW_PROPORTION = 0.10
 # TODO?: make this deep_scrub_interval - "max_expected_down_time"
-# you must set the "osd deep scrub interval" to 2 weeks in ceph.conf to avoid
-# the automatic deep scrubs to collide with the scheduled ones. This allows pauses
-# in scrubbing for up to one week in a 2 week window, which make rebalancing events
-# easier to handle
+# you must set the "osd deep scrub interval" to some greater value in ceph.conf
+# to avoid the automatic deep scrubs to collide with the scheduled ones.
+# The difference allows pauses in scrubbing, which is needed to handle
+# rebalancing events without overloading the cluster
 DEEP_SCRUB_TARGET_PERIOD = 14 * 24 * 3600 # 2 weeks
 # Set "osd scrub min interval" to 2 days in ceph.conf
-SCRUB_TARGET_PERIOD = 24 * 3600          # 1 day
+SCRUB_TARGET_PERIOD = 48 * 3600          # 2 days
 DELAY_WHEN_UNSYNCED = 60                 # 1 minute before checking again
 MAX_PARALLEL_DEEP_SCRUBS = 2
 MAX_PARALLEL_SCRUBS = 4
