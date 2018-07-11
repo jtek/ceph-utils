@@ -39,7 +39,7 @@ Recognized options:
 --ignore-load (-i)
     by default the scheduler slows down if the system load is greater than the
     number of processors it detects (warning: setting CPU affinity for the
-    scheduler  will artificially reduce this number)
+    scheduler will artificially reduce this number)
 EOMSG
   exit
 end
@@ -275,7 +275,8 @@ class LoadCheck
 
   def initialize
     @load_updater_mutex = Mutex.new
-    update_load
+    @next_update = Time.now
+    update_load_if_needed
   end
 
   # We don't slow down until load_ratio > 1
@@ -294,15 +295,14 @@ class LoadCheck
   private
 
   def update_load_if_needed
-    @load_updater_mutex.synchronize do
-      update_load if @last_load_update <= (Time.now - LOAD_VALIDITY_PERIOD)
-    end
+    return if Time.now > @next_update
+    @load_updater_mutex.synchronize { update_load }
   end
 
   def update_load
     # Warning Etc.nprocessors is restricted by CPU affinity
     @load_ratio = cpu_load / Etc.nprocessors
-    @last_load_update = Time.now
+    @next_update = Time.now + LOAD_VALIDITY_PERIOD
   end
 
   def cpu_load
