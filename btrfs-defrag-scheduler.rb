@@ -278,7 +278,7 @@ class LoadCheck
 
   def initialize
     @load_updater_mutex = Mutex.new
-    @next_update = Time.now
+    @next_update = Time.now - 1
     update_load_if_needed
   end
 
@@ -298,7 +298,7 @@ class LoadCheck
   private
 
   def update_load_if_needed
-    return if Time.now > @next_update
+    return if Time.now <= @next_update
     @load_updater_mutex.synchronize { update_load }
   end
 
