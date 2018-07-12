@@ -37,6 +37,8 @@ def filesystems
 end
 
 class Btrfs
+  attr_reader :mountpoint
+
   def initialize(mountpoint)
     @mountpoint = mountpoint
     @tried_targets = {}
@@ -202,10 +204,15 @@ class Btrfs
   end
 end
 
+def change_title(msg)
+  Process.setproctitle("btrfs-auto-rebalance: #{msg}")
+end
+
 def delay
   sleep_amount = (SPREAD * Random.rand).to_i
   return unless sleep_amount > 0
   log "delaying for #{sleep_amount}"
+  change_title("waiting until #{Time.now + sleep_amount}")
   sleep sleep_amount
 end
 
@@ -216,7 +223,10 @@ def rebalance_fs
     start = Time.now
     # don't use the same order on each run (one filesystem could take too long
     # and block others)
-    todo.shuffle.each { |btrfs| btrfs.rebalance_if_needed(start) }
+    todo.shuffle.each do |btrfs|
+      change_title("balancing #{btrfs.mountpoint}")
+      btrfs.rebalance_if_needed(start)
+    end
   end
 end
 
