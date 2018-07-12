@@ -11,11 +11,11 @@ MAX_REBALANCES = 100
 FLAPPING_LEVEL = 3
 # How fast can we move the -dusage/-musage targets
 MIN_TARGET_STEP = 2
-MAX_TARGET_STEP = 5
+MAX_TARGET_STEP = 10
 # Maximum time allocated globally
 MAX_TIME = 14400 # 4 hours
-MAX_FS_TIME = 7200 # 2 hours
-SPREAD = (ARGV[0] || 68400).to_i # 19 hours
+MAX_FS_TIME = 5400 # 90 minutes
+SPREAD = (ARGV[0] || (23 * 3600 - MAX_TIME)).to_i # Don't overlap next run
 
 require 'open3'
 
@@ -121,7 +121,8 @@ class Btrfs
         usage_target -= 1
       else
         successive_failures = 0
-	step = [ [ ((free_wasted - target_wasted) * 100) / 2, MIN_TARGET_STEP ].max,
+	step = [ [ ((free_wasted - target_wasted) * 100) * STEP_VS_WASTE,
+	            MIN_TARGET_STEP ].max,
 	         MAX_TARGET_STEP ].min.to_i
         usage_target = [ usage_target + step, 100 ].min
       end
