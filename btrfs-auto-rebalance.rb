@@ -12,6 +12,7 @@ FLAPPING_LEVEL = 3
 # How fast can we move the -dusage/-musage targets
 MIN_TARGET_STEP = 2
 MAX_TARGET_STEP = 10
+STEP_VS_WASTE = 0.75
 # Maximum time allocated globally
 MAX_TIME = 14400 # 4 hours
 MAX_FS_TIME = 5400 # 90 minutes
