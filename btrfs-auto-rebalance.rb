@@ -72,8 +72,7 @@ class Btrfs
     end
   end
 
-  def rebalance_if_needed(start_time)
-    @start_time = start_time
+  def rebalance_if_needed
     if rebalance_needed?
       log_current_state
       rebalance
@@ -141,7 +140,13 @@ class Btrfs
   end
 
   def must_stop_at
-    [ @start_time + MAX_TIME, @fs_start_time + MAX_FS_TIME ].min
+    self.class.must_stop_at(@fs_start_time)
+  end
+
+  class << self
+    def must_stop_at(fs_start_time = Time.now)
+      [ $start_time + MAX_TIME, fs_start_time + MAX_FS_TIME ].min
+    end
   end
 
   def fork_balance_cancel
@@ -222,12 +227,12 @@ def rebalance_fs
   todo = filesystems.map { |fs| Btrfs.new(fs) }.select(&:rebalance_needed?)
   if todo.any?
     delay
-    start = Time.now
+    $start_time = Time.now
     # don't use the same order on each run (one filesystem could take too long
     # and block others)
     todo.shuffle.each do |btrfs|
-      change_title("balancing #{btrfs.mountpoint}")
-      btrfs.rebalance_if_needed(start)
+      change_title("balancing #{btrfs.mountpoint} until #{Btrfs.must_stop_at}")
+      btrfs.rebalance_if_needed
     end
   end
 end
