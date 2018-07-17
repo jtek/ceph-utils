@@ -1544,7 +1544,7 @@ class BtrfsDev
     @slow_scan_expected_left = filecount
     @slow_scan_expected_left -= @last_processed if first_pass
     @slow_scan_stop_time = start + duration_factor * SLOW_SCAN_PERIOD
-    @next_slow_status_at ||= Time.now
+    @next_slow_status_at ||= (Time.now + SLOW_STATUS_PERIOD)
     # Target a batch size for MIN_DELAY_BETWEEN_FILEFRAGS interval between
     # filefrag calls
     init_slow_batch_size
@@ -1829,7 +1829,7 @@ class BtrfsDev
 
   def scan_on_track_percent(start, count)
     # Can't compute on first pass
-    return 100 if @filecount.nil?
+    return 100 if @filecount.nil? || @filecount == 0
     (100 * (count.to_f / @filecount) /
      ((Time.now - start).to_f / SLOW_SCAN_PERIOD)).to_i
   end
