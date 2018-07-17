@@ -1299,6 +1299,7 @@ class BtrfsDev
   # create the internal structures, including references to other mountpoints
   def initialize(dir, dev_fs_map)
     @dir = dir
+    @dir_slash = dir.end_with?("/") ? dir : "#{dir}/"
     @dirname = File.basename(dir)
     detect_options(dev_fs_map)
     load_filecount
@@ -1421,7 +1422,7 @@ class BtrfsDev
   end
 
   def position_on_fs(filename)
-    return filename if filename.index(dir) == 0
+    return filename if filename.index(@dir_slash) == 0
     subvol_fs = @fs_map.keys.find { |fs| filename.index(fs) == 0 }
     return nil unless subvol_fs
     # This is a local file, triggered from another subdir, move in our domain
@@ -1882,12 +1883,21 @@ class BtrfsDev
     fs_map = {}
     dev_list = Set.new
     rw_subvols = Set.new
+    # Note dev_fs_map may not have '/' terminated paths but we must use them
+    # for fast and accurate subpath detection/substitution in "position_on_fs"
     subvol_dirs_list.each do |subvol|
-      full_path = "#{dir}/#{subvol}"
+      full_path = if subvol.end_with?("/")
+                    "#{dir}/#{subvol}"
+                  else
+                    "#{dir}/#{subvol}/"
+                  end
       rw_subvols << full_path
       dev_id = File.stat(full_path).dev
       other_fs = dev_fs_map[dev_id]
-      other_fs.each { |fs| fs_map[fs] = full_path }
+      other_fs.each do |fs|
+        fs = "#{fs}/" unless fs.end_with?("/")
+        fs_map[fs] = full_path
+      end
       dev_list << dev_id
     end
     dev_list << File.stat(dir).dev
