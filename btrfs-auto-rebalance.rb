@@ -3,7 +3,8 @@
 # Maximum free space wasted as percentage
 MAX_WASTED_RATIO = 0.3
 # Maximum unallocated space above which no check is needed
-UNALLOCATED_THRESHOLD_RATIO = 0.5
+# use large value to keep data packed on the fastest cylinders if possible
+UNALLOCATED_THRESHOLD_RATIO = 0.75
 # Target max waste when rebalancing (not much less than max_wasted)
 TARGET_WASTED_RATIO = 0.25
 MAX_FAILURES = 50
