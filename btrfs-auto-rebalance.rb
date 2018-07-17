@@ -99,7 +99,7 @@ class Btrfs
     usage_target = start_target
     previous_wasted = free_wasted
     while (free_wasted > target_wasted) && (count < MAX_REBALANCES)
-      if Time.now > must_stop_at
+      if Time.now >= must_stop_at
         log "Time allocated spent, aborting"
 	Process.wait @balance_cancel_pid
 	log "aborted"
@@ -152,7 +152,7 @@ class Btrfs
   def fork_balance_cancel
     # sleep a minimum of 10 seconds to let the balance begin
     delay = [ (must_stop_at - Time.now).to_i, 10 ].max
-    @balance_cancel_pid = spawn("sleep #{delay} && btrfs balance cancel #{@mountpoint} &>/dev/null")
+    @balance_cancel_pid = spawn("sleep #{delay + 1} && btrfs balance cancel #{@mountpoint} &>/dev/null")
   end
 
   def kill_balance_cancel
