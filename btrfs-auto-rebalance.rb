@@ -16,7 +16,7 @@ STEP_VS_WASTE = 0.75
 # Maximum time allocated globally
 MAX_TIME = 14400 # 4 hours
 MAX_FS_TIME = 5400 # 90 minutes
-SPREAD = (ARGV[0] || (23 * 3600 - MAX_TIME)).to_i # Don't overlap next run
+SPREAD = (ARGV[0] || (24 * 3600 - MAX_TIME)).to_i # Don't overlap next run
 
 require 'open3'
 
