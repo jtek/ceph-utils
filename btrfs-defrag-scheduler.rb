@@ -1895,7 +1895,8 @@ class BtrfsDev
                   else
                     "#{dir}/#{subvol}/"
                   end
-      rw_subvols << full_path
+      # We need the original name for prune? to work
+      rw_subvols << "#{dir}/#{subvol}"
       dev_id = File.stat(full_path).dev
       other_fs = dev_fs_map[dev_id]
       other_fs.each do |fs|
