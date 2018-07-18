@@ -1845,8 +1845,11 @@ class BtrfsDev
     slowdown = LoadCheck.instance.slowdown_ratio
     return bounded_delay if slowdown == 1
     adjusted_delay = bounded_delay * slowdown
-    info "Slowing down (%.2fs) due to high load (%d%%)" %
-         [ adjusted_delay, (slowdown * 100) ]
+    # Don't log small slowdowns
+    if (adjusted_delay - bounded_delay) > 0.1
+      info "Slowing down (%.2fs → %.2fs) due to high load: %d%%" %
+           [ bounded_delay, adjusted_delay, (slowdown * 100) ]
+    end
     adjusted_delay
   end
 
