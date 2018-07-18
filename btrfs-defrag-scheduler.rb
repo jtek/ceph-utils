@@ -159,7 +159,8 @@ SLOW_SCAN_MAX_WAIT_FACTOR = 100
 SLOW_SCAN_MIN_WAIT_FACTOR = 0.8
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 0.5 / $speed_multiplier
-MAX_DELAY_BETWEEN_FILEFRAGS = 3600
+# Must be <= SLOW_STATUS_PERIOD to avoid multiple slow_status
+MAX_DELAY_BETWEEN_FILEFRAGS = 1800
 # Batch size constraints for full refresh thread
 # don't make it so large that at cruising speed it could overflow the queue
 # with only one batch
