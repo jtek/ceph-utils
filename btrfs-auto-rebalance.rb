@@ -1,4 +1,4 @@
-#!/usr/bin/ruby
+#!/usr/bin/ruby -w
 
 # Maximum free space wasted as percentage
 MAX_WASTED_RATIO = 0.3
@@ -17,7 +17,6 @@ STEP_VS_WASTE = 0.75
 # Maximum time allocated globally
 MAX_TIME = 14400 # 4 hours
 MAX_FS_TIME = 5400 # 90 minutes
-SPREAD = (ARGV[0] || (24 * 3600 - MAX_TIME)).to_i # Don't overlap next run
 
 require 'open3'
 
@@ -98,7 +97,6 @@ class Btrfs
     successive_failures = 0
     count = 0
     usage_target = start_target
-    previous_wasted = free_wasted
     while (free_wasted > target_wasted) && (count < MAX_REBALANCES)
       if Time.now >= must_stop_at
         log "Time allocated spent, aborting"
@@ -238,4 +236,15 @@ def rebalance_fs
   end
 end
 
-rebalance_fs
+def analyse_fs
+  filesystems.map do |fs|
+    Btrfs.new(fs).log_current_state
+  end
+end
+
+if ARGV[0] && ARGV[0] == "-a"
+  analyse_fs
+else
+  SPREAD = (ARGV[0] || (24 * 3600 - MAX_TIME)).to_i # Don't overlap next run
+  rebalance_fs
+end
