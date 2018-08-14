@@ -1534,14 +1534,21 @@ class BtrfsDev
     count = 0; already_processed = 0; recent = 0; queued = 0
     filelist = []
     filelist_arg_length = 0
-    start = @last_slow_scan_batch_start = Time.now
     # If we skip some files, we don't wait for the whole scan period either
-    duration_factor =
-      if first_pass && @filecount && @filecount > 0
-        (@filecount - @last_processed).to_f / @filecount
+    if first_pass && @filecount && @filecount > 0
+      duration_factor = (@filecount - @last_processed).to_f / @filecount
+      start = @last_slow_scan_batch_start =
+      if @last_processed > 0
+        # compute an approximate time start from the work already done
+        Time.now - (SLOW_SCAN_PERIOD * @last_processed.to_f / @filecount)
       else
-        1
+        Time.now
       end
+      info "set start time at #{start} to compensate for earlier work"
+    else
+      start = @last_slow_scan_batch_start = Time.now
+      duration_factor = 1
+    end
     @slow_scan_expected_left = filecount
     @slow_scan_expected_left -= @last_processed if first_pass
     @slow_scan_stop_time = start + duration_factor * SLOW_SCAN_PERIOD
