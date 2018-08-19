@@ -116,7 +116,7 @@ HISTORY_SERIALIZE_DELAY = 3600
 RECENT_SERIALIZE_DELAY = 120
 
 # How many files do we queue for defragmentation
-MAX_QUEUE_LENGTH = 500
+MAX_QUEUE_LENGTH = 1000
 # What is our target queue length proportion where our speed is nominal
 # (speedup above it, slowdown under it)
 QUEUE_PROPORTION_EQUILIBRIUM = 0.1
@@ -181,7 +181,7 @@ SLOW_STATUS_PERIOD = 1800 # every 30 minutes
 # How often do we check for new filesystems or umounted filesystems
 FS_DETECT_PERIOD = 60
 # How often do we restart the fatrace thread ?
-# there were bugs where fatrace would stop report modifications under
+# there were bugs where fatrace would stop reporting modifications under
 # some conditions (mounts or remounts, fatrace processes per mountpoint and
 # old fatrace version), it might not apply anymore but this doesn't put any
 # measurable load on the system and we are unlikely to miss files
