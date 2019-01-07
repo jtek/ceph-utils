@@ -108,9 +108,10 @@ COST_HISTORY_SIZE = 2000
 # Tune this to change the effort made to defragment (1.0: max effort)
 MIN_FRAGMENTATION_THRESHOLD = 1.05
 # Warning, can try to defragment many files that can't be defragmented if set
-# too (lowered from 50 to 33 because some filesystems have files difficult to
-# defragment which prevents others to be defragmented)
-COST_THRESHOLD_PERCENTILE = 33
+# too low (lowered to 25 because some filesystems have files difficult
+# to defragment which prevents others to be defragmented)
+# Note: asking for defragmenting files that won't be may not generate disk load
+COST_THRESHOLD_PERCENTILE = 25
 COST_COMPUTE_DELAY = 60
 HISTORY_SERIALIZE_DELAY = 3600
 RECENT_SERIALIZE_DELAY = 120
@@ -160,20 +161,20 @@ SLOW_SCAN_MIN_WAIT_FACTOR = 0.8
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 0.5 / $speed_multiplier
 # Must be <= SLOW_STATUS_PERIOD to avoid multiple slow_status
-MAX_DELAY_BETWEEN_FILEFRAGS = 1800
+MAX_DELAY_BETWEEN_FILEFRAGS = 300 / $speed_multiplier
 # Batch size constraints for full refresh thread
 # don't make it so large that at cruising speed it could overflow the queue
 # with only one batch
 MAX_FILES_BATCH_SIZE =
   (MAX_QUEUE_LENGTH * (1 - QUEUE_PROPORTION_EQUILIBRIUM)).to_i
-MIN_FILES_BATCH_SIZE = 10
+MIN_FILES_BATCH_SIZE = 1
 
 # We ignore files recently defragmented for 12 hours
 IGNORE_AFTER_DEFRAG_DELAY = 12 * 3600
 
-MIN_DELAY_BETWEEN_DEFRAGS = 0.02
+MIN_DELAY_BETWEEN_DEFRAGS = 0.05
 # Actually max delay before checking when to defrag next
-MAX_DELAY_BETWEEN_DEFRAGS = 10
+MAX_DELAY_BETWEEN_DEFRAGS = 30
 
 # How often do we dump a status update
 STATUS_PERIOD = 120 # every 2 minutes
@@ -205,7 +206,7 @@ $output_mutex = Mutex.new
 # Synchronize mulithreaded outputs
 module Outputs
   def short_tstamp
-    Time.now.strftime("%Y%m%d %H%M%S")
+.now.strftime("%Y%m%d %H%M%S")
   end
   def error(msg)
     $output_mutex.synchronize {
