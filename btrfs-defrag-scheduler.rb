@@ -206,7 +206,7 @@ $output_mutex = Mutex.new
 # Synchronize mulithreaded outputs
 module Outputs
   def short_tstamp
-.now.strftime("%Y%m%d %H%M%S")
+    Time.now.strftime("%Y%m%d %H%M%S")
   end
   def error(msg)
     $output_mutex.synchronize {
