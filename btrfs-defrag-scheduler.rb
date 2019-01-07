@@ -16,7 +16,7 @@ Recognized options:
 
 --full-scan-time <value> (-s)
     Number of hours over which to scan the filesystem (>= 1)
-    defaults to 7 x 24 = 1 week
+    defaults to 4 x 7 x 24 = 4 weeks
 
 --target-extent-size <value> (-t)
     value passed to btrfs filesystem defrag "-t" parameter (32M)
