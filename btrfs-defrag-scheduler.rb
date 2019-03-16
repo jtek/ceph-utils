@@ -1490,7 +1490,10 @@ class BtrfsDev
     return @defrag_cmd if @defrag_cmd
     cmd =
       [ "btrfs", "filesystem", "defragment", "-t", $default_extent_size, "-f" ]
-    cmd << "-c#{@compression_algo}" if @compression_algo
+    if @compression_algo
+      short_algo = @compression_algo.gsub(/:.*$/, '')
+      cmd << "-c#{short_algo}"
+    end
     @defrag_cmd = cmd
   end
 
