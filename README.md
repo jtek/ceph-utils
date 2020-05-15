@@ -12,14 +12,13 @@ By default it stores its state in the /root/.btrfs_defrag directory which it
 creates automatically.
 
 The scheduler both tracks file writes to detect recent heavy fragmentation and
-slowly scans the whole filesystem over a one week period (the number of hours
+slowly scans the whole filesystem over a one month period (the number of hours
 targeted for this slow scan can be passed as a parameter). During the slow
-scan it detects lower fragmentation and fragmentation it didn't have time to
-remove yet.
+scan it detects fragmentation it didn't have time to process yet.
 
 The scheduler tries to restrict IO load and memory usage in several ways. With
 default settings it should not put any significant load on a Ceph OSD and
-should not use significantly more than 100MB by OSD.
+should not use significantly more than 100MB of memory by OSD.
 
 The latest versions are able to handle more standard Btrfs usages (with many
 snapshots for example). It won't try to defragment read-only snapshots, will
@@ -34,9 +33,8 @@ Use this file to avoid defragmenting data when competition for defragmentation
 between several read-write copies of the same files exist between different
 subvolumes (typically read-write snapshots with low usage).
 
-When defragmenting, zlib is used to compress data if any compression is used
-for the filesystem mount (this is expected to give better performance when
-reading data back). 
+When defragmenting, the compression option of the mounted filesystem is used to
+compress data.
 
 Dependencies:
 * Ruby 2.0 or later
