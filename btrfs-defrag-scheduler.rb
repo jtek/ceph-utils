@@ -101,26 +101,32 @@ end
 # meanwhile fatrace is used to monitor written files
 # if these are heavily fragmented, defragmentation is triggered early
 
-# Used to remeber how low the cost is brought down
+# Used to remember how low the cost is brought down
 # higher values means more stable behaviour in the effort made
 # to defragment
 COST_HISTORY_SIZE = 2000
 # Tune this to change the effort made to defragment (1.0: max effort)
+# this is a compromise: some files are written to regularly, you don't want to
+# defragment then as soon as they begin to fragment themselves or you will have
+# to defragment them very often, generating I/O load that would defeat the
+# purpose of defragmenting (keeping latencies low)
 MIN_FRAGMENTATION_THRESHOLD = 1.05
-# Warning, can try to defragment many files that can't be defragmented if set
-# too low (lowered to 25 because some filesystems have files difficult
-# to defragment which prevents others to be defragmented)
+# Some files can't be defragmented below 1.05, especially when BTRFS uses
+# compression
+# So we track the level of fragmentation obtained after defragmenting to detect
+# the level where we should stop trying
 # Note: asking for defragmenting files that won't be may not generate disk load
+# at least no disk writes (and reads have high cache hits probabilities)
 COST_THRESHOLD_PERCENTILE = 25
 COST_COMPUTE_DELAY = 60
 HISTORY_SERIALIZE_DELAY = 3600
 RECENT_SERIALIZE_DELAY = 120
 
 # How many files do we queue for defragmentation
-MAX_QUEUE_LENGTH = 1000
+MAX_QUEUE_LENGTH = 2000
 # What is our target queue length proportion where our speed is nominal
 # (speedup above it, slowdown under it)
-QUEUE_PROPORTION_EQUILIBRIUM = 0.1
+QUEUE_PROPORTION_EQUILIBRIUM = 0.05
 # How much device time the program is allowed to use
 # (values when queue == MAX_QUEUE_LENGTH)
 # time window => max_device_use_ratio
@@ -134,9 +140,9 @@ EXPECTED_COMPRESS_RATIO = 0.5
 
 # How many files do we track for writes, we pass these to the defragmentation
 # queue when activity stops (this amount limits memory usage)
-MAX_TRACKED_WRITTEN_FILES = 10_000
+MAX_TRACKED_WRITTEN_FILES = 20_000
 # Period over which to distribute defragmentation checks for files which
-# were written at the same time, this avoids filefrag storms
+# were written at the same time, this avoids filefrag call storms
 DEFRAG_CHECK_DISTRIBUTION_PERIOD = 120
 # How often do we check fragmentation of files written to
 TRACKED_WRITTEN_FILES_CONSOLIDATION_PERIOD = 5
@@ -153,9 +159,10 @@ FRAGMENTATION_INFO_DELAY_FACTOR = 4
 MAX_WRITES_DELAY = 4 * 3600
 
 # Full refresh of fragmentation information on files happens in
-# (pass number of hours on commandline if the default is not wanted)
+# (pass number of hours on commandline if the default is not optimal for you)
 SLOW_SCAN_PERIOD = (scan_time || 4 * 7 * 24) * 3600 # 1 month
 SLOW_SCAN_CATCHUP_WAIT = slow_start
+# These are used to compensate for deviation of the slow scan progress
 SLOW_SCAN_MAX_WAIT_FACTOR = 100
 SLOW_SCAN_MIN_WAIT_FACTOR = 0.8
 # Sleep constraints between 2 filefrags call in full refresh thread
@@ -188,7 +195,8 @@ FS_DETECT_PERIOD = 60
 # measurable load on the system and we are unlikely to miss files
 FATRACE_TTL = 24 * 3600 # every day
 # How often do we check the subvolumes list ?
-# it can be costly but undetected subvolumes aren't traversed
+# it can be costly but we need them to avoid defragmenting read-only snapshots
+# (we consider these not useful to defragment)
 SUBVOL_TTL = 3600
 
 # System dependent (reserve 100 for cmd and 4096 for one path entry)
@@ -200,6 +208,9 @@ STORE_DIR        = "/root/.btrfs_defrag"
 FILE_COUNT_STORE = "#{STORE_DIR}/filecounts.yml"
 HISTORY_STORE    = "#{STORE_DIR}/costs.yml"
 RECENT_STORE     = "#{STORE_DIR}/recent.yml"
+
+# Per filesystem defrag blacklist
+DEFRAG_BLACKLIST_FILE = ".no_defrag"
 
 $output_mutex = Mutex.new
 
@@ -1527,6 +1538,7 @@ class BtrfsDev
   end
 
   private
+
   # Slowly update files, targeting a SLOW_SCAN_PERIOD period for all updates
   def slow_files_state_update(first_pass: false)
     if first_pass && @last_processed > 0
@@ -1874,7 +1886,7 @@ class BtrfsDev
 
   def load_exceptions
     no_defrag_list = []
-    exceptions_file = "#{dir}/.no_defrag"
+    exceptions_file = "#{dir}/#{DEFRAG_BLACKLIST_FILE}"
     if File.readable?(exceptions_file)
       no_defrag_list =
         File.read(exceptions_file).split("\n").map { |path| "#{dir}/#{path}" }
