@@ -163,17 +163,15 @@ MAX_WRITES_DELAY = 4 * 3600
 SLOW_SCAN_PERIOD = (scan_time || 4 * 7 * 24) * 3600 # 1 month
 SLOW_SCAN_CATCHUP_WAIT = slow_start
 # These are used to compensate for deviation of the slow scan progress
-SLOW_SCAN_MAX_WAIT_FACTOR = 100
+SLOW_SCAN_MAX_WAIT_FACTOR = 10
 SLOW_SCAN_MIN_WAIT_FACTOR = 0.8
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 0.5 / $speed_multiplier
-# Must be <= SLOW_STATUS_PERIOD to avoid multiple slow_status
 MAX_DELAY_BETWEEN_FILEFRAGS = 300 / $speed_multiplier
 # Batch size constraints for full refresh thread
 # don't make it so large that at cruising speed it could overflow the queue
 # with only one batch
-MAX_FILES_BATCH_SIZE =
-  (MAX_QUEUE_LENGTH * (1 - QUEUE_PROPORTION_EQUILIBRIUM)).to_i
+MAX_FILES_BATCH_SIZE = MAX_QUEUE_LENGTH / 4
 MIN_FILES_BATCH_SIZE = 1
 
 # We ignore files recently defragmented for 12 hours
@@ -201,7 +199,7 @@ SUBVOL_TTL = 3600
 
 # System dependent (reserve 100 for cmd and 4096 for one path entry)
 FILEFRAG_ARG_MAX = 131072 - 100 - 4096
-FILEFRAG_ARGCOUNT_MAX = 50
+FILEFRAG_ARGCOUNT_MAX = 25
 
 # Where do we serialize our data
 STORE_DIR        = "/root/.btrfs_defrag"
@@ -1327,9 +1325,7 @@ class BtrfsDev
     @slow_scan_thread = Thread.new {
       info("## Beginning files list updater thread for #{dir}")
       slow_files_state_update(first_pass: true)
-      loop do
-        slow_files_state_update
-      end
+      loop { slow_files_state_update }
     }
 
     @defrag_thread = Thread.new {
@@ -1544,7 +1540,7 @@ class BtrfsDev
     if first_pass && @last_processed > 0
       info("#{@dirname}: skipping #{@last_processed} files " \
            "in #{SLOW_SCAN_CATCHUP_WAIT}s")
-      # Avoids hammering disk just after startup
+      # Avoids hammering disk just after boot (see "--slow-start" option)
       sleep SLOW_SCAN_CATCHUP_WAIT
     end
     count = 0; already_processed = 0; recent = 0; queued = 0
@@ -1552,7 +1548,6 @@ class BtrfsDev
     filelist_arg_length = 0
     # If we skip some files, we don't wait for the whole scan period either
     if first_pass && @filecount && @filecount > 0
-      duration_factor = (@filecount - @last_processed).to_f / @filecount
       start = @last_slow_scan_batch_start =
       if @last_processed > 0
         # compute an approximate time start from the work already done
@@ -1563,67 +1558,68 @@ class BtrfsDev
       info "set start time at #{start} to compensate for earlier work"
     else
       start = @last_slow_scan_batch_start = Time.now
-      duration_factor = 1
     end
-    @slow_scan_expected_left = filecount
-    @slow_scan_expected_left -= @last_processed if first_pass
-    @slow_scan_stop_time = start + duration_factor * SLOW_SCAN_PERIOD
-    @next_slow_status_at ||= (Time.now + SLOW_STATUS_PERIOD)
+    # Note @last_processed == 0 unless first_pass after interrupted pass
+    @slow_scan_expected_left = expected_filecount - @last_processed
+    @slow_scan_stop_time = start + SLOW_SCAN_PERIOD
+    @slow_status_at ||= Time.now
     # Target a batch size for MIN_DELAY_BETWEEN_FILEFRAGS interval between
     # filefrag calls
-    init_slow_batch_size
+    init_slow_batch
     begin
       Find.find(dir) do |path|
         slow_status(start, queued, count, already_processed, recent)
         if prune?(path)
           Find.prune
-        else
-          # ignore files with unparsable names
-          short_name = short_filename(path) rescue ""
-          next if short_name == ""
-          # Only process file entries (File.file? is true for symlinks)
-          next unless File.exists?(path)
-          next if !File.file?(path) || File.symlink?(path)
-          count += 1
-          # Don't process during a resume
-          next if first_pass && (count < @last_processed)
-          if first_pass
-            info "Caught up #{@last_processed} files"
-            first_pass = false
-          end
-          # Ignore recently processed files
-          if @files_state.recently_defragmented?(short_name)
-            already_processed += 1
-            next
-          end
-          stat = File.stat(path) rescue nil
-          # If we can't stat a file it's not processable
-          next unless stat
-          # Don't try to process a recently modified file
-          # its layout isn't available until next Btrfs commit
-          last_modification =
-            [ stat.mtime, stat.ctime ].max
-          if last_modification > (Time.now - (commit_delay + 5))
-            recent += 1
-            next
-          end
-          # Files small enough to fit a node can't be fragmented
-          if stat.size <= 4096
-            # We don't count it as if nothing changes it won't become a target
-            count -= 1
-            next
-          end
+          next
+        end
 
-          filelist << path
-          filelist_arg_length += (path.size + 1) # count space
+        # ignore files with unparsable names
+        short_name = short_filename(path) rescue ""
+        next if short_name == ""
+        # Only process file entries (File.file? is true for symlinks)
+        next unless File.exists?(path)
+        next if !File.file?(path) || File.symlink?(path)
+        count += 1
+        # Don't process during a resume
+        next if first_pass && (count < @last_processed)
 
-          # Stop and compute fragmentation for each completed batch
-          if (filelist.size == @slow_batch_size) ||
-             (filelist_arg_length >= FILEFRAG_ARG_MAX)
-            queued += queue_slow_batch(count, filelist)
-            filelist = []; filelist_arg_length = 0
-            wait_next_slow_scan_pass(count)
-          end
+        if first_pass
+          info "Caught up #{@last_processed} files"
+          first_pass = false
+        end
+        # Ignore recently processed files
+        if @files_state.recently_defragmented?(short_name)
+          already_processed += 1
+          next
+        end
+        stat = File.stat(path) rescue nil
+        # If we can't stat a file it's not processable
+        next unless stat
+        # Don't try to process a recently modified file
+        # its layout isn't available until next Btrfs commit
+        last_modification =
+          [ stat.mtime, stat.ctime ].max
+        if last_modification > (Time.now - (commit_delay + 5))
+          recent += 1
+          next
+        end
+        # Files small enough to fit a node can't be fragmented
+        if stat.size <= 4096
+          # We don't count it as if nothing changes it won't become a target
+          count -= 1
+          next
+        end
+
+        filelist << path
+        filelist_arg_length += (path.size + 1) # count space
+
+        # Stop and compute fragmentation for each completed batch
+        if (filelist.size == @slow_batch_size) ||
+           (filelist_arg_length >= FILEFRAG_ARG_MAX)
+          queued += queue_slow_batch(count, filelist)
+          filelist = []; filelist_arg_length = 0
+          wait_next_slow_scan_pass(count)
         end
       end
     rescue => ex
@@ -1637,9 +1633,9 @@ class BtrfsDev
       frags = FileFragmentation.batch_init(filelist, self)
       queued += @files_state.update_files(frags)
     end
-    was_guessed = @filecount.nil?
+    filecount_was_guessed = @filecount.nil?
     update_filecount(processed: 0, total: count)
-    wait_slow_scan_restart(was_guessed)
+    wait_slow_scan_restart(filecount_was_guessed)
   end
 
   def prune?(entry)
@@ -1712,7 +1708,8 @@ class BtrfsDev
                   true
                 else
                   (processed < @last_processed) ||
-                    ((processed.to_f - @last_processed) / filecount) > 0.001
+                    ((processed.to_f - @last_processed) / expected_filecount) >
+                    0.001
                 end
     return unless do_update
     @filecount = total || @filecount
@@ -1731,94 +1728,84 @@ class BtrfsDev
   end
 
   # Get filecount or a default value
-  def filecount
+  def expected_filecount
     @filecount ||
       SLOW_SCAN_PERIOD * MIN_FILES_BATCH_SIZE / MIN_DELAY_BETWEEN_FILEFRAGS
   end
 
   # Return number of items queued
   def queue_slow_batch(count, filelist)
-    @slow_scan_expected_left = filecount - count
-    # Use largest batch if we didn't finish in time
-    if (@slow_scan_expected_left < 0) || (scan_time_left < 0)
-      @slow_batch_size = MAX_FILES_BATCH_SIZE
-    end
+    @slow_scan_expected_left = expected_filecount - count
     frags = FileFragmentation.batch_init(filelist, self)
     @files_state.update_files(frags)
   end
 
   def wait_next_slow_scan_pass(count)
     update_filecount(processed: count)
-    delay = if @filecount && (scan_time_left > 0) && (count < filecount)
-              compute_slow_scan_delay
-            else
-              @slow_batch_size = MAX_FILES_BATCH_SIZE
-              MIN_DELAY_BETWEEN_FILEFRAGS
-            end
-    sleep delay
+    sleep compute_slow_scan_delay
     @last_slow_scan_batch_start = Time.now
   end
 
   # This is adaptative: we wait more if the queue is full and we can afford it
   # and speed up on empty queues using wait_factor
+  # this returns how much to wait and modify the batch size
   def compute_slow_scan_delay
-    # Count time spent processing a batch to compensate for it
-    previous_batch_duration = Time.now - @last_slow_scan_batch_start
-    # Take the minimum sleep after batch into account
-    previous_batch_interval =
-      previous_batch_duration + MIN_DELAY_BETWEEN_FILEFRAGS
-    factor = wait_factor
-    largest_interval = scan_time_left * MIN_FILES_BATCH_SIZE /
-                       @slow_scan_expected_left
-    target_interval = largest_interval * factor
-    # If we can't keep up, first increase batch size
-    @slow_batch_size =
-      if target_interval >=
-         (previous_batch_interval *
-          MIN_FILES_BATCH_SIZE / @slow_batch_size)
-        # Current load allows to reduce to the minimum
-        MIN_FILES_BATCH_SIZE
-      else
-        ((MIN_FILES_BATCH_SIZE * previous_batch_interval) /
-         target_interval).ceil
-      end
-    # Cap batch size
-    @slow_batch_size = [ @slow_batch_size, MAX_FILES_BATCH_SIZE ].min
-    # Compute target delay
-    delay = scan_time_left * @slow_batch_size / @slow_scan_expected_left
-    # Sleep to target the compensated delay
-    [ [ (delay * factor) - previous_batch_duration,
-        MIN_DELAY_BETWEEN_FILEFRAGS ].max,
-      MAX_DELAY_BETWEEN_FILEFRAGS ].min
+    # Count time spent finding files in previous batch to compensate for it
+    previous_batch_collection = Time.now - @last_slow_scan_batch_start
+    time_left = scan_time_left
+
+    if @slow_scan_expected_left <= 0 ||
+       time_left <= MIN_DELAY_BETWEEN_FILEFRAGS || !@filecount
+      # Speed up
+      @slow_batch_size = MAX_FILES_BATCH_SIZE
+      return MIN_DELAY_BETWEEN_FILEFRAGS
+    end
+
+    # There's time left
+    @rate_objective = time_left / @slow_scan_expected_left
+
+    # When the queue is small target a slightly higher rate to absorb occasional
+    # slowdowns
+    @rate_objective *= wait_factor * @slow_batch_size
+
+    # Are we fast enough ?
+    rate_objective_ratio =
+      @rate_objective / (previous_batch_collection + MIN_DELAY_BETWEEN_FILEFRAGS)
+    adjust_slow_batch_size(rate_objective_ratio)
+    [ [ @rate_objective - previous_batch_collection,
+        MAX_DELAY_BETWEEN_FILEFRAGS].min, MIN_DELAY_BETWEEN_FILEFRAGS ].max
   end
 
   def wait_factor
-    # How soon can we reach the end at max speed?
-    min_process_left =
-      (@slow_scan_expected_left.to_f / MAX_FILES_BATCH_SIZE) *
-      MIN_DELAY_BETWEEN_FILEFRAGS
-    can_slow = scan_time_left > min_process_left
     queue_proportion = @files_state.queue_fill_proportion
     # We slow the scan above 2 * QUEUE_PROPORTION_EQUILIBRIUM and speed up below
-    wait_factor = if queue_proportion > 2 * QUEUE_PROPORTION_EQUILIBRIUM
-                    ((queue_proportion - 2 * QUEUE_PROPORTION_EQUILIBRIUM) /
-                     (1 - 2 * QUEUE_PROPORTION_EQUILIBRIUM) *
-                     (SLOW_SCAN_MAX_WAIT_FACTOR - 1)) + 1
-                  else
-                    SLOW_SCAN_MIN_WAIT_FACTOR +
-                      ((2 * QUEUE_PROPORTION_EQUILIBRIUM - queue_proportion) /
-                       (2 * QUEUE_PROPORTION_EQUILIBRIUM) *
-                       (1 - SLOW_SCAN_MIN_WAIT_FACTOR))
-                  end
-    wait_factor = [ wait_factor, 1 ].min unless can_slow
-    wait_factor
+    target_proportion = 2 * QUEUE_PROPORTION_EQUILIBRIUM
+    if queue_proportion > target_proportion
+      # linear scale between 1 and SLOW_SCAN_MAX_WAIT_FACTOR
+      ((queue_proportion - target_proportion) /
+       (1 - target_proportion) *
+       (SLOW_SCAN_MAX_WAIT_FACTOR - 1)) + 1
+    else
+      # linear scale between 1 and SLOW_SCAN_MIN_WAIT_FACTOR
+      SLOW_SCAN_MIN_WAIT_FACTOR +
+        (queue_proportion / target_proportion * (1 - SLOW_SCAN_MIN_WAIT_FACTOR))
+    end
   end
 
-  def init_slow_batch_size
+  def adjust_slow_batch_size(speed_ratio)
+    batch_size = @slow_batch_size / (speed_ratio ** 0.5)
+    @slow_batch_size = [ [ batch_size.to_i, MIN_FILES_BATCH_SIZE ].max,
+                         MAX_FILES_BATCH_SIZE ].min
+  end
+
+  def init_slow_batch
     @slow_batch_size = [ ((MIN_DELAY_BETWEEN_FILEFRAGS.to_f *
                            @slow_scan_expected_left) /
                           scan_time_left).ceil,
                          MIN_FILES_BATCH_SIZE ].max
+    @rate_objective =
+      [ (scan_time_left / @slow_scan_expected_left) * @slow_batch_size,
+        MIN_DELAY_BETWEEN_FILEFRAGS ].max
   end
 
   def wait_slow_scan_restart(guessed_filecount)
@@ -1834,28 +1821,32 @@ class BtrfsDev
     @slow_scan_stop_time - Time.now
   end
 
-  def slow_status(start, queued, count, already_processed, recent,
-                  stopped = false)
-    return if @next_slow_status_at > Time.now
-    @next_slow_status_at += SLOW_STATUS_PERIOD
-    msg = ("#{stopped ? '#' : '-'} %s %d%% %d/%ds: %d queued / %d found, " +
-           "%d recent defrag (fuzzy), %d changed recently, %d low cost") %
-          [ @dirname, scan_on_track_percent(start, count),
+  def slow_status(start, queued, count, already_processed, recent)
+    return if @slow_status_at > Time.now
+    # This handles large slowdowns and suspends without spamming the log
+    @slow_status_at += SLOW_STATUS_PERIOD until @slow_status_at > Time.now
+    msg = ("- %s %s %d/%ds: %d queued / %d found, " \
+           "%d recent defrag (fuzzy), %d changed recently") %
+          [ @dirname, scan_status(start, count),
             (Time.now - start).to_i, SLOW_SCAN_PERIOD, queued, count,
-            already_processed, recent,
-            count - already_processed - recent - queued ]
+            already_processed, recent ]
     if @files_state.last_queue_overflow_at &&
        (@files_state.last_queue_overflow_at > (Time.now - SLOW_SCAN_PERIOD))
-      msg += " ovf: #{(Time.now - @files_state.last_queue_overflow_at).to_i}s ago"
+      msg +=
+        " ovf: %ds ago" % (Time.now - @files_state.last_queue_overflow_at).to_i
     end
     info msg
   end
 
-  def scan_on_track_percent(start, count)
+  def scan_status(start, count)
     # Can't compute on first pass
-    return 100 if @filecount.nil? || @filecount == 0
-    (100 * (count.to_f / @filecount) /
-     ((Time.now - start).to_f / SLOW_SCAN_PERIOD)).to_i
+    percent = if @filecount.nil? || @filecount == 0
+                "?%"
+              else
+                "%.1f%%" % (100 * (count.to_f / @filecount) /
+                            ((Time.now - start).to_f / SLOW_SCAN_PERIOD)).to_f
+              end
+    ("%d/%.2fs " % [ @slow_batch_size, @rate_objective ]) + percent
   end
 
   # Don't loop on defrag aggressively if there isn't much to be done
