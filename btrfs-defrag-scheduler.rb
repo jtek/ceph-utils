@@ -536,9 +536,8 @@ class FilefragParser
     when /^\s*\d+:\s*\d+\.\.\s*\d+:\s*(\d+)\.\.\s*(\d+):\s*(\d+):\s*(\S*)$/
       # Either first line or continuation of previous extent
       unless @total_seek_time == 0 ||
-          Regexp.last_match(1).to_i == (@last_offset + 1)
-        error("** Last line looks like a first line **\n" +
-              @buffer.join("\n"))
+             Regexp.last_match(1).to_i == (@last_offset + 1)
+        error("** Last line looks like a first line **\n" + buffer_dump)
       end
       @last_offset = Regexp.last_match(2).to_i
       flags = Regexp.last_match(4)
@@ -549,12 +548,21 @@ class FilefragParser
         @uncompressed_blocks += length
       end
     else
-      error("** unknown line **\n" + @buffer.join("\n"))
+      error("** unknown line **\n" + buffer_dump)
     end
   rescue StandardError => ex
-    error("** unprocessable line **\n" + @buffer.join("\n"))
+    error("** unprocessable line **\n" + buffer_dump)
     error ex.to_s
     error ex.backtrace.join("\n")
+  end
+
+  def buffer_dump
+    if !$debug && @buffer.size > 12
+      skipped = "  [... skipped #{@buffer.size - 10} lines ...]  "
+      (@buffer[0..6] + [ skipped ] + @buffer[-3..-1]).join("\n")
+    else
+      @buffer.join("\n")
+    end
   end
 
   # Prepare for a new file
