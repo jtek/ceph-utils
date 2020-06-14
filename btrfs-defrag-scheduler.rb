@@ -758,7 +758,10 @@ class FilesState
     # How often a file is changing its hash data source to avoid colliding
     # with the same other files
     ROTATING_PERIOD = 7 * 24 * 3600 # one week
-    ROTATE_SEGMENT = ROTATING_PERIOD.to_f / (2 ** 16)
+    # Split the objects in smaller groups that rotate independently
+    # to avoid spikes on rotations
+    ROTATE_GROUPS = 2 ** 16
+    ROTATE_SEGMENT = ROTATING_PERIOD.to_f / ROTATE_GROUPS
 
     attr_reader :size
 
@@ -856,17 +859,18 @@ class FilesState
       info "FuzzyEventTracker size is: #{size}" if $debug
     end
 
-    # The actual position slowly changes
+    # The actual position slowly changes (once every ROTATING_PERIOD)
     def position_offset(object_id)
       object_digest = Digest::MD5.digest(object_id)
       verylong_int =
         object_digest.unpack('N*').
         each_with_index.map { |a, i| a * (2**32)**i }.inject(&:+)
-      # This gives us a 0-65535 range
-      rotating_offset = verylong_int & 65535
+      # This distributes object_ids so that they don't rotate simultaneously
+      # which would create large spikes in new objects to defragment
+      rotating_offset = verylong_int & (ROTATE_GROUPS - 1)
       rotation = ((Time.now.to_i + (rotating_offset * ROTATE_SEGMENT)) /
                   ROTATING_PERIOD).to_i
-      # We have a 128 bit integer and need to get 24 bits (3 bytes)
+      # verylong_int is a 128 bit integer and we need to get 24 bits (3 bytes)
       digest_offset = rotation % 104
       # We get the position from 3 bytes (24 bits)
       event_idx = ((verylong_int >> digest_offset) & 16777215) % MAX_ENTRIES
