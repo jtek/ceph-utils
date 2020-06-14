@@ -1994,6 +1994,9 @@ class BtrfsDevs
         @btrfs_devs << BtrfsDev.new(dir, dev_fs_map)
         @new_fs = true
       }
+      # Longer devs first to avoid a top dir matching a file
+      # in a device mounted below
+      @btrfs_devs.sort_by! { |dev| -dev.dir.size }
     end
   end
 
