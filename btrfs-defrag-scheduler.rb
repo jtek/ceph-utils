@@ -551,6 +551,10 @@ class FilefragParser
     else
       error("** unknown line **\n" + @buffer.join("\n"))
     end
+  rescue StandardError => ex
+    error("** unprocessable line **\n" + @buffer.join("\n"))
+    error ex.to_s
+    error ex.backtrace.join("\n")
   end
 
   # Prepare for a new file
@@ -648,7 +652,7 @@ class FileFragmentation
       return
     end
 
-    IO.popen(["filefrag", "-v", filename]) do |io|
+    IO.popen(["filefrag", "-v", filename], external_encoding: "UTF-8") do |io|
       parser = FilefragParser.new
       while line = io.gets do
         line.chomp!
