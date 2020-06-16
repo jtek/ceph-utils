@@ -2084,14 +2084,8 @@ end
 info "**********************************************"
 info "** Starting BTRFS defragmentation scheduler **"
 info "**********************************************"
-next_dev_update = Time.now
 devs = BtrfsDevs.new
 devs.update!
 Thread.new { fatrace_file_writes(devs) }
 
-loop do
-  next_dev_update += FS_DETECT_PERIOD
-  now = Time.now
-  sleep (next_dev_update - now) if now < next_dev_update
-  devs.update!
-end
+loop { sleep FS_DETECT_PERIOD; devs.update! }
