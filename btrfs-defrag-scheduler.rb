@@ -163,8 +163,8 @@ MAX_WRITES_DELAY = 4 * 3600
 SLOW_SCAN_PERIOD = (scan_time || 4 * 7 * 24) * 3600 # 1 month
 SLOW_SCAN_CATCHUP_WAIT = slow_start
 # These are used to compensate for deviation of the slow scan progress
-SLOW_SCAN_MAX_WAIT_FACTOR = 10
-SLOW_SCAN_MIN_WAIT_FACTOR = 0.8
+SLOW_SCAN_MAX_SPEED_FACTOR = 1.2
+SLOW_SCAN_MIN_SPEED_FACTOR = 0.1
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 0.5 / $speed_multiplier
 MAX_DELAY_BETWEEN_FILEFRAGS = 300 / $speed_multiplier
@@ -1581,7 +1581,8 @@ class BtrfsDev
     @slow_status_at ||= Time.now
     # Target a batch size for MIN_DELAY_BETWEEN_FILEFRAGS interval between
     # filefrag calls
-    init_slow_batch
+    @average_batch_time ||= 0
+    set_slow_batch_target
     begin
       Find.find(dir) do |path|
         slow_status(start, queued, count, already_processed, recent)
@@ -1758,70 +1759,59 @@ class BtrfsDev
 
   def wait_next_slow_scan_pass(count)
     update_filecount(processed: count)
-    sleep compute_slow_scan_delay
+    adjust_slow_scan_batches
+    sleep [ @slow_batch_period - @average_batch_time,
+            MIN_DELAY_BETWEEN_FILEFRAGS ].max
     @last_slow_scan_batch_start = Time.now
   end
 
   # This is adaptative: we wait more if the queue is full and we can afford it
-  # and speed up on empty queues using wait_factor
+  # and speed up on empty queues using speed_factor
   # this returns how much to wait and modify the batch size
-  def compute_slow_scan_delay
+  def adjust_slow_scan_batches
     # Count time spent finding files in previous batch to compensate for it
-    previous_batch_collection = Time.now - @last_slow_scan_batch_start
-    time_left = scan_time_left
+    previous_batch_time = Time.now - @last_slow_scan_batch_start
+    # Find out the average batch time
+    @average_batch_time =
+      (@average_batch_time * 19 + previous_batch_time) / 20
 
-    if @slow_scan_expected_left <= 0 ||
-       time_left <= MIN_DELAY_BETWEEN_FILEFRAGS || !@filecount
-      # Speed up
-      @slow_batch_size = MAX_FILES_BATCH_SIZE
-      return MIN_DELAY_BETWEEN_FILEFRAGS
-    end
-
-    # There's time left
-    @rate_objective = time_left / @slow_scan_expected_left
-
-    # When the queue is small target a slightly higher rate to absorb occasional
-    # slowdowns
-    @rate_objective *= wait_factor * @slow_batch_size
-
-    # Are we fast enough ?
-    rate_objective_ratio =
-      @rate_objective / (previous_batch_collection + MIN_DELAY_BETWEEN_FILEFRAGS)
-    adjust_slow_batch_size(rate_objective_ratio)
-    [ [ @rate_objective - previous_batch_collection,
-        MAX_DELAY_BETWEEN_FILEFRAGS].min, MIN_DELAY_BETWEEN_FILEFRAGS ].max
+    set_slow_batch_target
   end
 
-  def wait_factor
+  def speed_factor
     queue_proportion = @files_state.queue_fill_proportion
     # We slow the scan above 2 * QUEUE_PROPORTION_EQUILIBRIUM and speed up below
     target_proportion = 2 * QUEUE_PROPORTION_EQUILIBRIUM
     if queue_proportion > target_proportion
-      # linear scale between 1 and SLOW_SCAN_MAX_WAIT_FACTOR
+      # linear scale between SLOW_SCAN_MIN_SPEED_FACTOR and 1
       ((queue_proportion - target_proportion) /
        (1 - target_proportion) *
-       (SLOW_SCAN_MAX_WAIT_FACTOR - 1)) + 1
+       (SLOW_SCAN_MIN_SPEED_FACTOR - 1)) + 1
     else
-      # linear scale between 1 and SLOW_SCAN_MIN_WAIT_FACTOR
-      SLOW_SCAN_MIN_WAIT_FACTOR +
-        (queue_proportion / target_proportion * (1 - SLOW_SCAN_MIN_WAIT_FACTOR))
+      # linear scale between 1 and SLOW_SCAN_MAX_SPEED_FACTOR
+      SLOW_SCAN_MAX_SPEED_FACTOR + (queue_proportion / target_proportion *
+                                    (1 - SLOW_SCAN_MAX_SPEED_FACTOR))
     end
   end
 
-  def adjust_slow_batch_size(speed_ratio)
-    batch_size = @slow_batch_size / (speed_ratio ** 0.5)
-    @slow_batch_size = [ [ batch_size.to_i, MIN_FILES_BATCH_SIZE ].max,
-                         MAX_FILES_BATCH_SIZE ].min
+  def slow_batch_target
+    # If there isn't enough time or data, speed up
+    time_left = scan_time_left
+    if @slow_scan_expected_left <= 0 || !@filecount || time_left < 0
+      return [ MAX_FILES_BATCH_SIZE, MIN_DELAY_BETWEEN_FILEFRAGS ]
+    end
+
+    slow_batch_size = [ (((MIN_DELAY_BETWEEN_FILEFRAGS + @average_batch_time) *
+                          @slow_scan_expected_left * speed_factor) /
+                         time_left).ceil, MIN_FILES_BATCH_SIZE ].max
+    slow_batch_period =
+      [ [ (scan_time_left / @slow_scan_expected_left) * slow_batch_size,
+          MIN_DELAY_BETWEEN_FILEFRAGS ].max, MAX_DELAY_BETWEEN_FILEFRAGS ].min
+    [ slow_batch_size, slow_batch_period ]
   end
 
-  def init_slow_batch
-    @slow_batch_size = [ ((MIN_DELAY_BETWEEN_FILEFRAGS.to_f *
-                           @slow_scan_expected_left) /
-                          scan_time_left).ceil,
-                         MIN_FILES_BATCH_SIZE ].max
-    @rate_objective =
-      [ (scan_time_left / @slow_scan_expected_left) * @slow_batch_size,
-        MIN_DELAY_BETWEEN_FILEFRAGS ].max
+  def set_slow_batch_target
+    @slow_batch_size, @slow_batch_period = slow_batch_target
   end
 
   def wait_slow_scan_restart(guessed_filecount)
@@ -1862,7 +1852,7 @@ class BtrfsDev
                 "%.1f%%" % (100 * (count.to_f / @filecount) /
                             ((Time.now - start).to_f / SLOW_SCAN_PERIOD)).to_f
               end
-    ("%d/%.2fs " % [ @slow_batch_size, @rate_objective ]) + percent
+    ("%d/%.2fs " % [ @slow_batch_size, @slow_batch_period ]) + percent
   end
 
   # Don't loop on defrag aggressively if there isn't much to be done
