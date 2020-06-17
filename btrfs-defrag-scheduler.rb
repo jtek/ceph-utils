@@ -1340,6 +1340,11 @@ class BtrfsDev
     @stat_mutex = Mutex.new
     @stat_thread = Thread.new { handle_stat_queue_progress }
 
+    @average_file_time = 0
+    @slow_batch_size = 1
+    @slow_batch_period = MIN_DELAY_BETWEEN_FILEFRAGS
+    @current_speed_factor = 0
+
     @slow_scan_thread = Thread.new {
       info("## Beginning files list updater thread for #{dir}")
       slow_files_state_update(first_pass: true)
@@ -1589,8 +1594,6 @@ class BtrfsDev
     @slow_status_at ||= Time.now
     # Target a batch size for MIN_DELAY_BETWEEN_FILEFRAGS interval between
     # filefrag calls
-    @average_file_time ||= 0
-    @slow_batch_size ||= 1
     set_slow_batch_target
     begin
       Find.find(dir) do |path|
@@ -1735,8 +1738,9 @@ class BtrfsDev
     do_update = if (total && total != @filecount)
                   true
                 else
-                  @last_filecount_updated_at&.<(Time.now -
-                                                FILECOUNT_SERIALIZE_DELAY)
+                  @last_filecount_updated_at &&
+                    @last_filecount_updated_at < (Time.now -
+                                                  FILECOUNT_SERIALIZE_DELAY)
                 end
     return unless do_update
 
@@ -1865,7 +1869,7 @@ class BtrfsDev
     msg = ("$ %s %d/%ds: %d queued / %d found, " \
            "%d recent defrag (fuzzy), %d changed recently") %
           [ @dirname, scan_time.to_i, SLOW_SCAN_PERIOD, queued,
- @considered, already_processed, recent ]
+            @considered, already_processed, recent ]
     if @files_state.last_queue_overflow_at &&
        (@files_state.last_queue_overflow_at > (Time.now - SLOW_SCAN_PERIOD))
       msg +=
@@ -1875,6 +1879,8 @@ class BtrfsDev
   end
 
   def scan_time
+    return 0 unless @scan_start
+
     Time.now - @scan_start
   end
 
@@ -2079,7 +2085,9 @@ def fatrace_file_writes(devs)
             break if devs.new_fs?
           end
         rescue => ex
-          error "Error in inner fatrace thread: #{ex}"
+          msg = "#{ex}\n#{ex.backtrace.join("\n")}"
+          error "Error in inner fatrace thread: #{msg}"
+          sleep 1 # Limit CPU load in case of bug
         end
       end
     rescue => ex
