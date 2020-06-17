@@ -1574,7 +1574,7 @@ class BtrfsDev
   # Slowly update files, targeting a SLOW_SCAN_PERIOD period for all updates
   def slow_files_state_update(first_pass: false)
     if first_pass
-      info("#{@dirname}: skipping #{@last_processed} files " \
+      info("= #{@dirname}: skipping #{@last_processed} files " \
            "in #{SLOW_SCAN_CATCHUP_WAIT}s")
       # Avoids hammering disk just after boot (see "--slow-start" option)
       sleep SLOW_SCAN_CATCHUP_WAIT
@@ -1614,7 +1614,7 @@ class BtrfsDev
 
         if first_pass
           next if @considered < @last_processed
-          info "Caught up #{@last_processed} files"
+          info "= #{@dirname}: caught up #{@last_processed} files"
           first_pass = false
         end
         # Ignore recently processed files
