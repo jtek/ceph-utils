@@ -695,6 +695,7 @@ class FileFragmentation
       sleep btrfs.delay_until_available_for_filefrag
       frags = []
       btrfs.run_with_device_usage do
+        start = Time.now
         IO.popen([ "filefrag", "-v" ] + files) do |io|
           parser = FilefragParser.new
           while line = io.gets do
@@ -706,6 +707,7 @@ class FileFragmentation
             end
           end
         end
+        btrfs.register_filefrag_speed(files.size, Time.now - start)
       end
       frags
     end
@@ -1564,9 +1566,21 @@ class BtrfsDev
                 " %.1f%%" % (100 * (@considered.to_f / @filecount) /
                             (scan_time.to_f / SLOW_SCAN_PERIOD)).to_f
               end
-    ("%d/%.2fs+%.2fs (%.2f)" %
+    ("%d/%.2fs (%.3fs expected) factor %.2f" %
      [ @slow_batch_size, @slow_batch_period, average_batch_time,
        @current_speed_factor ]) + percent
+  end
+
+  def register_filefrag_speed(count, time)
+    file_time = time / count
+    weight = time / 120
+    @average_file_time = if weight >= 0.5
+                           (@average_file_time + file_time) / 2
+                         else
+                           @average_file_time * (1 - weight) +
+                             file_time * weight
+                         end
+    set_slow_batch_target
   end
 
   private
@@ -1615,6 +1629,8 @@ class BtrfsDev
         if first_pass
           next if @considered < @last_processed
           info "= #{@dirname}: caught up #{@last_processed} files"
+          # Avoid an abnormaly slow first batch
+          @last_slow_scan_batch_start = Time.now
           first_pass = false
         end
         # Ignore recently processed files
@@ -1644,7 +1660,7 @@ class BtrfsDev
         filelist_arg_length += (path.size + 1) # count space
 
         # Stop and compute fragmentation for each completed batch
-        if (filelist.size == @slow_batch_size) ||
+        if (filelist.size >= @slow_batch_size) ||
            (filelist_arg_length >= FILEFRAG_ARG_MAX)
           queued += queue_slow_batch(filelist)
           filelist = []; filelist_arg_length = 0
@@ -1773,7 +1789,8 @@ class BtrfsDev
 
   def wait_next_slow_scan_pass
     update_filecount(processed: @considered)
-    adjust_slow_scan_batches
+    # adjust_slow_scan_batches
+    # set_slow_batch_target
     sleep [ @slow_batch_period - average_batch_time,
             MIN_DELAY_BETWEEN_FILEFRAGS ].max
     @last_slow_scan_batch_start = Time.now
@@ -1786,9 +1803,9 @@ class BtrfsDev
     # Count time spent processing files in previous batch to compensate for it
     # Find out the average filefrag time per file over 2 minutes
     # Favor last timings by giving them more weight
-    previous_file_time =
-      (Time.now - @last_slow_scan_batch_start) / @slow_batch_size
-    weight = (@slow_batch_period + MIN_DELAY_BETWEEN_FILEFRAGS) / 120
+    previous_batch_time = Time.now - @last_slow_scan_batch_start
+    previous_file_time = previous_batch_time / @slow_batch_size
+    weight = previous_batch_time / 120
     @average_file_time = if weight >= 0.5
                            (@average_file_time + previous_file_time) / 2
                          else
@@ -1814,13 +1831,11 @@ class BtrfsDev
     # This uses an estimation of the future batch_time (based on last batches)
     # this will create larger batches than necessary after slowdowns
     # but avoids solving a quadratic function
-    slow_batch_size = [ [ ((MIN_DELAY_BETWEEN_FILEFRAGS + average_batch_time) *
-                           (left * @current_speed_factor) /
-                           time_left).ceil, MIN_FILES_BATCH_SIZE ].max,
-                        MAX_FILES_BATCH_SIZE ].min
+    slow_batch_size = [ [ ((MIN_DELAY_BETWEEN_FILEFRAGS * left *
+                            @current_speed_factor) / time_left).ceil,
+                          MIN_FILES_BATCH_SIZE ].max, MAX_FILES_BATCH_SIZE ].min
     slow_batch_period =
-      [ [ (slow_batch_size * time_left / left) -
-          (average_batch_time / @current_speed_factor),
+      [ [ slow_batch_size * time_left / left,
           MIN_DELAY_BETWEEN_FILEFRAGS ].max, MAX_DELAY_BETWEEN_FILEFRAGS ].min
     [ slow_batch_size, slow_batch_period ]
   end
@@ -1828,21 +1843,25 @@ class BtrfsDev
   def speed_factor
     queue_proportion = @files_state.queue_fill_proportion
     # We slow the scan above QUEUE_PROPORTION_EQUILIBRIUM and speed up below
-    if queue_proportion > QUEUE_PROPORTION_EQUILIBRIUM
-      # linear scale between SLOW_SCAN_MIN_SPEED_FACTOR and 1
-      ((queue_proportion - QUEUE_PROPORTION_EQUILIBRIUM) /
-       (1 - QUEUE_PROPORTION_EQUILIBRIUM) *
-       (SLOW_SCAN_MIN_SPEED_FACTOR - 1)) + 1
-    else
-      # linear scale between 1 and SLOW_SCAN_MAX_SPEED_FACTOR
-      SLOW_SCAN_MAX_SPEED_FACTOR +
-        (queue_proportion / QUEUE_PROPORTION_EQUILIBRIUM *
-         (1 - SLOW_SCAN_MAX_SPEED_FACTOR))
-    end
+    factor = if queue_proportion > QUEUE_PROPORTION_EQUILIBRIUM
+               # linear scale between SLOW_SCAN_MIN_SPEED_FACTOR and 1
+               ((queue_proportion - QUEUE_PROPORTION_EQUILIBRIUM) /
+                (1 - QUEUE_PROPORTION_EQUILIBRIUM) *
+                (SLOW_SCAN_MIN_SPEED_FACTOR - 1)) + 1
+             else
+               # linear scale between 1 and SLOW_SCAN_MAX_SPEED_FACTOR
+               SLOW_SCAN_MAX_SPEED_FACTOR +
+                 (queue_proportion / QUEUE_PROPORTION_EQUILIBRIUM *
+                  (1 - SLOW_SCAN_MAX_SPEED_FACTOR))
+             end
+    factor / LoadCheck.instance.slowdown_ratio
   end
 
+  # We run filefrag concurrently with defragmentation
+  # (through delay_until_available_for_filefrag), suppose the average batch time
+  # is twice what's needed in the semi-isolation warranted by this method
   def average_batch_time
-    @average_file_time * @slow_batch_size
+    2 * @average_file_time * @slow_batch_size
   end
 
   def slow_scan_expected_left
