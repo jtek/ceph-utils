@@ -1738,7 +1738,7 @@ class BtrfsDev
     do_update = if (total && total != @filecount)
                   true
                 else
-                  @last_filecount_updated_at &&
+                  !@last_filecount_updated_at ||
                     @last_filecount_updated_at < (Time.now -
                                                   FILECOUNT_SERIALIZE_DELAY)
                 end
