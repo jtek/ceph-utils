@@ -340,9 +340,10 @@ class UsagePolicyChecker
 
   # Caller should use delay_until_available before using this
   def run_with_device_usage(&block)
-    start = Time.now
     # Prevent concurrent accesses
-    result = @mutex.synchronize { block.call }
+    start, result = @mutex.synchronize do
+      [ Time.now, block.call ]
+    end
     add_usage(start, Time.now)
     result
   end
@@ -367,16 +368,12 @@ class UsagePolicyChecker
     activity = 0.0
     window_start = Time.now - LOAD_WINDOW
     @device_uses.each do |start, stop|
-      if start > window_start
-        activity += stop - start
-      elsif stop > window_start
-        activity += stop - window_start
-      end
+      next if stop <= window_start
+      activity += stop - [ start, window_start ].max
     end
     load = activity / LOAD_WINDOW
     if @last_load_check <= (Time.now - (LOAD_WINDOW / 2))
       @average_load = (@average_load + load) / 2
-
     end
     load
   end
@@ -449,8 +446,7 @@ class UsagePolicyChecker
     time_spent = 0
     @device_uses.each do |use_start, use_stop|
       next if use_stop < start
-      our_start = [ use_start, start ].max
-      time_spent += (use_stop - our_start)
+      time_spent += use_stop - [ use_start, start ].max
     end
     # We don't consider expected_time if there's no device_use
     return 0 if time_spent == 0
