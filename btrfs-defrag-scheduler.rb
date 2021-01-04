@@ -1033,11 +1033,12 @@ class FilesState
     @fragmentation_info_mutex.synchronize do
       # Remove duplicates
       # they will be replaced in queue later if still above threshold)
-      duplicates = 0
+      duplicate_names = []
       TYPES.each do |type|
         @file_fragmentations[type].reject! do |frag|
-          if updated_names.include?(frag.short_filename)
-            duplicates += 1
+          short_name = frag.short_filename
+          if updated_names.include?(short_name)
+            duplicate_names += short_name
             true
           end
         end
@@ -1051,7 +1052,11 @@ class FilesState
       # Remove old entries and fit in max queue length
       cleanup_files
       # Return number of queued items, ignoring duplicates
-      updated_names.size - duplicates
+      (updated_names - duplicate_names).select do |n|
+        # Use uncompressed first as it seems the most common case
+        @file_fragmentations[:uncompressed].any? { |f| f.short_filename == n } ||
+        @file_fragmentations[:compressed].any? { |f| f.short_filename == n }
+      end.size
     end
   end
 
