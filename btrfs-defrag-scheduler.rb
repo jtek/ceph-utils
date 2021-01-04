@@ -341,9 +341,7 @@ class UsagePolicyChecker
   # Caller should use delay_until_available before using this
   def run_with_device_usage(&block)
     # Prevent concurrent accesses
-    start, result = @mutex.synchronize do
-      [ Time.now, block.call ]
-    end
+    start, result = @mutex.synchronize { [ Time.now, block.call ] }
     add_usage(start, Time.now)
     result
   end
@@ -1021,38 +1019,40 @@ class FilesState
     @writes_mutex.synchronize { @written_files.delete(shortname) }
   end
 
+  def tracking_writes?(shortname)
+    @writes_mutex.synchronize { @written_files.include?(shortname) }
+  end
+
+  # This adds or updates work to do based on fragmentations
   def update_files(file_fragmentations)
     return 0 unless file_fragmentations.any?
+
     updated_names = file_fragmentations.map(&:short_filename)
-    duplicate_names = []
     # Remove files we won't consider anyway
     file_fragmentations.reject! { |frag| below_threshold_cost(frag) }
-    @fragmentation_info_mutex.synchronize {
-      # Remove duplicates and compute duplicate names
-      TYPES.each { |type|
-        @file_fragmentations[type].reject! { |frag|
+    @fragmentation_info_mutex.synchronize do
+      # Remove duplicates
+      # they will be replaced in queue later if still above threshold)
+      duplicates = 0
+      TYPES.each do |type|
+        @file_fragmentations[type].reject! do |frag|
           if updated_names.include?(frag.short_filename)
-            duplicate_names << frag.short_filename
+            duplicates += 1
             true
-          else
-            false
           end
-        }
-      }
-      # Insert new versions (if they are still above threshold) and new files
-      file_fragmentations.each { |f| @file_fragmentations[f.compress_type] << f }
+        end
+      end
+      # Insert new versions and new files
+      file_fragmentations.each do |f|
+        @file_fragmentations[f.compress_type] << f
+      end
+      # Keep the order to easily fetch the worst fragemented ones
       sort_files
       # Remove old entries and fit in max queue length
       cleanup_files
-      # Returns the number of new files queued
-      updated_names -= duplicate_names
-      # Verify we didn't cleanup some of them
-      updated_names.select { |n|
-        # Use uncompressed first as it seems the most common case
-        @file_fragmentations[:uncompressed].any? { |f| f.short_filename == n } ||
-        @file_fragmentations[:compressed].any? { |f| f.short_filename == n }
-      }.size
-    }
+      # Return number of queued items, ignoring duplicates
+      updated_names.size - duplicates
+    end
   end
 
   def file_written_to(filename)
@@ -1156,10 +1156,9 @@ class FilesState
     @writes_mutex.synchronize do
       batch.each { |shortname| @written_files.delete(shortname) }
     end
-    update_files(FileFragmentation.batch_init(to_check, @btrfs))
+
     # Cleanup written_files if it overflows, moving files to the defragmentation
     # queue
-    to_check = []
     @writes_mutex.synchronize do
       if @written_files.size > MAX_TRACKED_WRITTEN_FILES
         to_remove = @written_files.size - MAX_TRACKED_WRITTEN_FILES
@@ -1510,8 +1509,10 @@ class BtrfsDev
 
   def position_on_fs(filename)
     return filename if filename.index(@dir_slash) == 0
+
     subvol_fs = @fs_map.keys.find { |fs| filename.index(fs) == 0 }
     return nil unless subvol_fs
+
     # This is a local file, triggered from another subdir, move in our domain
     filename.gsub(subvol_fs, @fs_map[subvol_fs])
   end
@@ -1519,8 +1520,8 @@ class BtrfsDev
   def defrag!
     file_frag = get_next_file_to_defrag
     return unless file_frag
-    shortname = file_frag.short_filename
 
+    shortname = file_frag.short_filename
     # We declare it defragmented ASAP to avoid a double queue
     @files_state.defragmented!(shortname)
     run_with_device_usage do
@@ -1533,7 +1534,7 @@ class BtrfsDev
       end
       system(*cmd)
     end
-    # Clear up any writes detected concurrently
+    # Clear up any write detected concurrently
     @files_state.remove_tracking(shortname)
     stat_queue(file_frag)
   end
@@ -1541,6 +1542,7 @@ class BtrfsDev
   # recursively search for the next file to defrag
   def get_next_file_to_defrag
     return nil unless @files_state.any_interesting_file?
+
     file_frag = @files_state.pop_most_interesting
     shortname = file_frag.short_filename
     # Check that file still exists
@@ -1682,17 +1684,14 @@ class BtrfsDev
           already_processed += 1
           next
         end
-        stat = File.stat(path) rescue nil
-        # If we can't stat a file it's not processable
-        next unless stat
-        # Don't try to process a recently modified file
-        # its layout isn't available until next Btrfs commit
-        last_modification =
-          [ stat.mtime, stat.ctime ].max
-        if last_modification > (Time.now - (commit_delay + 5))
+        # Ignore tracked files
+        if @files_state.tracking_writes?(short_name)
           recent += 1
           next
         end
+        stat = File.stat(path) rescue nil
+        # If we can't stat a file it's not processable
+        next unless stat
         # Files small enough to fit a node can't be fragmented
         if stat.size <= 4096
           # We don't count it as if nothing changes it won't become a target
@@ -1718,10 +1717,7 @@ class BtrfsDev
       @slow_scan_stop_time = Time.now + MIN_DELAY_BETWEEN_FILEFRAGS
     end
     # Process remaining files to update
-    if filelist.any?
-      frags = FileFragmentation.batch_init(filelist, self)
-      queued += @files_state.update_files(frags)
-    end
+    queued += queue_slow_batch(filelist) if filelist.any?
     filecount_was_guessed = @filecount.nil?
     update_filecount(processed: 0, total: @considered)
     wait_slow_scan_restart(filecount_was_guessed)
