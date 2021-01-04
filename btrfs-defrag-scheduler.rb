@@ -374,6 +374,7 @@ class UsagePolicyChecker
     load = activity / LOAD_WINDOW
     if @last_load_check <= (Time.now - (LOAD_WINDOW / 2))
       @average_load = (@average_load + load) / 2
+      @last_load_check = Time.now
     end
     load
   end
