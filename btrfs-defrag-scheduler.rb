@@ -1038,7 +1038,7 @@ class FilesState
         @file_fragmentations[type].reject! do |frag|
           short_name = frag.short_filename
           if updated_names.include?(short_name)
-            duplicate_names += short_name
+            duplicate_names << short_name
             true
           end
         end
