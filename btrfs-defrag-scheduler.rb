@@ -16,10 +16,11 @@ Recognized options:
 
 --full-scan-time <value> (-s)
     Number of hours over which to scan the filesystem (>= 1)
-    defaults to 4 x 7 x 24 = 4 weeks
+    default: 4 x 7 x 24 (4 weeks)
 
---target-extent-size <value> (-t)
-    value passed to btrfs filesystem defrag "-t" parameter (32M)
+--target-extent-size <value> (-e)
+    value passed to btrfs filesystem defrag "-t" parameter
+    default: 32M
 
 --verbose (-v)
     prints defragmention as it happens
@@ -28,42 +29,56 @@ Recognized options:
     prints internal processes information
 
 --speed-multiplier <value> (-m)
-    slows down (<1.0) or speeds up (>1.0) the defragmentation process (1.0)
+    slows down (<1.0) or speeds up (>1.0) the defragmentation process
+    the process try to avoid monopolizing the I/O bandwidth,
+    don't increase this unless you have to correct the default behaviour
+    default: 1.0
 
 --slow-start <value> (-l)
-    wait for <value> seconds before scanning (600)
+    wait for <value> seconds before scanning the filesystems,
+    files modified/created are still processed during this period
+    default: 600
 
 --drive-count <value> (-c)
-    number of 7200rpm drives behind the filesystem (1)
+    number of 7200rpm drives used by the filesystem
+    this changes the cost of seeking when computing fragmentation costs
+    more drives: less cost
+    default: 1
 
 --ignore-load (-i)
+    WARNING: this can and will reduce your FS performance during heavy I/O
     by default the scheduler slows down if the system load is greater than the
     number of processors it detects (warning: setting CPU affinity for the
-    scheduler will artificially reduce this number)
+    scheduler will artificially reduce this number).
+    default: off
+
+--target-load (-t)
+    load to use as a threshold for reducing defragmentation activity
+    use if the default load target isn't ideal
+    default: number of CPUs detected
 EOMSG
   exit
 end
 
-opts = GetoptLong.new([ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
-                      [ '--verbose', '-v', GetoptLong::NO_ARGUMENT ],
-                      [ '--debug', '-d', GetoptLong::NO_ARGUMENT ],
-                      [ '--ignore-load', '-i', GetoptLong::NO_ARGUMENT ],
-                      [ '--full-scan-time', '-s',
-                        GetoptLong::REQUIRED_ARGUMENT ],
-                      [ '--target-extent-size', '-t',
-                        GetoptLong::REQUIRED_ARGUMENT ],
-                      [ '--speed-multiplier', '-m',
-                        GetoptLong::REQUIRED_ARGUMENT ],
-                      [ '--slow-start', '-l',
-                        GetoptLong::REQUIRED_ARGUMENT ],
-                      [ '--drive-count', '-c',
-                        GetoptLong::REQUIRED_ARGUMENT ])
+opts =
+  GetoptLong.new([ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
+                 [ '--verbose', '-v', GetoptLong::NO_ARGUMENT ],
+                 [ '--debug', '-d', GetoptLong::NO_ARGUMENT ],
+                 [ '--ignore-load', '-i', GetoptLong::NO_ARGUMENT ],
+                 [ '--full-scan-time', '-s', GetoptLong::REQUIRED_ARGUMENT ],
+                 [ '--target-extent-size', '-e',
+                   GetoptLong::REQUIRED_ARGUMENT ],
+                 [ '--speed-multiplier', '-m', GetoptLong::REQUIRED_ARGUMENT ],
+                 [ '--slow-start', '-l', GetoptLong::REQUIRED_ARGUMENT ],
+                 [ '--drive-count', '-c', GetoptLong::REQUIRED_ARGUMENT ],
+                 [ '--target-load', '-t', GetoptLong::REQUIRED_ARGUMENT ])
 
 # Latest recommendation from BTRFS developpers as of 2016
 $default_extent_size = '32M'
 $verbose = false
 $debug = false
 $ignore_load = false
+$target_load = nil
 $speed_multiplier = 1.0
 $drive_count = 1
 slow_start = 600
@@ -92,6 +107,8 @@ opts.each do |opt,arg|
     $drive_count = 1 if $drive_count < 1
   when '--ignore_load'
     $ignore_load = true
+  when '--target_load'
+    $target_load = arg.to_f
   end
 end
 
@@ -316,8 +333,13 @@ class LoadCheck
 
   def update_load
     # Warning Etc.nprocessors is restricted by CPU affinity
-    @load_ratio = cpu_load / Etc.nprocessors
+    @load_ratio = cpu_load / target_load
     @next_update = Time.now + LOAD_VALIDITY_PERIOD
+  end
+
+  def target_load
+    return $target_load if $target_load
+    Etc.nprocessors
   end
 
   def cpu_load
