@@ -571,17 +571,18 @@ class FilefragParser
     reinit
   end
 
-  # This handles the actual parsing
+  # This handles the actual parsing, we use binary encoding for regexp to match
+  # expected string encoding
   def add_line(line)
     @buffer << line
     case line
-    when /^Filesystem type is:/,
-         /^ ext:     logical_offset:        physical_offset: length:   expected: flags:/
+    when /^Filesystem type is:/n,
+         /^ ext:     logical_offset:        physical_offset: length:   expected: flags:/n
       # Headers, ignored
-    when /^File size of (.+) is (\d+) /
+    when /^File size of (.+) is (\d+) /n
       @filesize = Regexp.last_match(2).to_i
       @filename = Regexp.last_match(1)
-    when /^(.+): \d+ extents? found$/
+    when /^(.+): \d+ extents? found$/n
       if @filename != Regexp.last_match(1)
         error("Couldn't understand this part:\n" +
               @buffer.join("\n") +
@@ -589,7 +590,7 @@ class FilefragParser
       else
         @eof = true
       end
-    when /^\s*\d+:\s*\d+\.\.\s*\d+:\s*(\d+)\.\.\s*(\d+):\s*(\d+):\s*(\d+):\s?(\S*)$/
+    when /^\s*\d+:\s*\d+\.\.\s*\d+:\s*(\d+)\.\.\s*(\d+):\s*(\d+):\s*(\d+):\s?(\S*)$/n
       # Example of such a line:
       #    1:      960..    1023:  193214976.. 193215039:     64:  193217920: last,eof
       @total_seek_time +=
@@ -602,7 +603,7 @@ class FilefragParser
       else
         @uncompressed_blocks += length
       end
-    when /^\s*\d+:\s*\d+\.\.\s*\d+:\s*(\d+)\.\.\s*(\d+):\s*(\d+):\s*(\S*)$/
+    when /^\s*\d+:\s*\d+\.\.\s*\d+:\s*(\d+)\.\.\s*(\d+):\s*(\d+):\s*(\S*)$/n
       # Either first line or continuation of previous extent
       unless @total_seek_time == 0 ||
              Regexp.last_match(1).to_i == (@last_offset + 1)
@@ -724,11 +725,10 @@ class FileFragmentation
       return
     end
 
-    IO.popen(["filefrag", "-v", filename], external_encoding: "UTF-8") do |io|
+    IO.popen(["filefrag", "-v", filename], external_encoding: "BINARY") do |io|
       parser = FilefragParser.new
       while line = io.gets do
-        line.chomp!
-        parser.add_line(line)
+        parser.add_line(line.chomp!)
         if parser.eof?
           self.fragmentation_cost = parser.current_frag_cost
           @size = parser.size
@@ -768,11 +768,10 @@ class FileFragmentation
       frags = []
       btrfs.run_with_device_usage do
         start = Time.now
-        IO.popen([ "filefrag", "-v" ] + files) do |io|
+        IO.popen([ "filefrag", "-v" ] + files, external_encoding: "BINARY") do |io|
           parser = FilefragParser.new
           while line = io.gets do
-            line.chomp!
-            parser.add_line(line)
+            parser.add_line(line.chomp!)
             if parser.eof?
               frags << parser.file_fragmentation(btrfs)
               parser.reinit
