@@ -1987,8 +1987,9 @@ class BtrfsDev
     slow_batch_size =
       [ [ (MIN_DELAY_BETWEEN_FILEFRAGS * adjusted_filefrag_rate).ceil,
           MIN_FILES_BATCH_SIZE ].max, MAX_FILES_BATCH_SIZE ].min
+    # to_f avoids ZeroDivisionError
     slow_batch_period =
-      [ [ slow_batch_size / adjusted_filefrag_rate,
+      [ [ slow_batch_size / adjusted_filefrag_rate.to_f,
           MIN_DELAY_BETWEEN_FILEFRAGS ].max, MAX_DELAY_BETWEEN_FILEFRAGS ].min
     [ slow_batch_size, slow_batch_period ]
   end
