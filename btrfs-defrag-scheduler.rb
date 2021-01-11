@@ -1571,18 +1571,32 @@ class BtrfsDev
     # We declare it defragmented ASAP to avoid a double queue
     @files_state.defragmented!(shortname)
     run_with_device_usage do
-      cmd = defrag_cmd + [ file_frag.filename ]
       if $verbose
-        msg = " - %s: %s %s,%s,%.2f" %
+        mtime = File.mtime(file_frag.filename)
+        msg = " - %s: %s %s,%s,%.2f,%s" %
               [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
-                file_frag.human_size, file_frag.fragmentation_cost ]
+                file_frag.human_size, file_frag.fragmentation_cost,
+                human_delay(mtime) ]
         info(msg)
       end
-      system(*cmd)
+      system(*defrag_cmd, file_frag.filename)
     end
     # Clear up any write detected concurrently
     @files_state.remove_tracking(shortname)
     stat_queue(file_frag)
+  end
+
+  def human_delay(timestamp)
+    delay_maps = { 24 * 3600 => "d",
+                   3600      => "h",
+                   60        => "m",
+                   1         => "s",
+                   nil       => "now" }
+    delay = Time.now - timestamp
+    delay_maps.each do |amount, suffix|
+      return suffix unless amount
+      return "%.1f%s" % [ delay / amount, suffix ] if delay >= amount
+    end
   end
 
   # recursively search for the next file to defrag
