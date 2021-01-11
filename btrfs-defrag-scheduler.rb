@@ -1888,7 +1888,7 @@ class BtrfsDev
   # Get filecount or a default value
   def expected_filecount
     @filecount ||
-      SLOW_SCAN_PERIOD * MIN_FILES_BATCH_SIZE / MIN_DELAY_BETWEEN_FILEFRAGS
+      SLOW_SCAN_PERIOD * MAX_FILES_BATCH_SIZE / MIN_DELAY_BETWEEN_FILEFRAGS
   end
 
   # Return number of items queued
@@ -1928,7 +1928,9 @@ class BtrfsDev
 
   def init_slow_batch_target
     @speed_increases = 0
-    set_slow_batch_target
+    @slow_batch_size, @slow_batch_period =
+                      batch_target_for(files_left: expected_filecount,
+                                       time_left: SLOW_SCAN_PERIOD)
   end
 
   def set_slow_batch_target
@@ -1952,9 +1954,14 @@ class BtrfsDev
       return [ @slow_batch_size, @slow_batch_period ]
     end
 
-    # Slow down if we found the expected files and still have time
+    # Maintain cruising speed if we found the expected files and still have time
     left = slow_scan_expected_left
-    return [ MIN_FILES_BATCH_SIZE, MAX_DELAY_BETWEEN_FILEFRAGS ] if left <= 0
+    global_slowdown = @current_speed_factor * @checker.expected_slowdown
+    if left <= 0
+      return batch_target_for(files_left: expected_filecount,
+                              time_left: SLOW_SCAN_PERIOD,
+                              global_slowdown: global_slowdown)
+    end
 
     # If we don't know the filesystem yet make a fast first pass
     # (rework for large and busy filesystems ?)
@@ -1969,14 +1976,19 @@ class BtrfsDev
     # but avoids solving a quadratic function, take the queue size, global load
     # and estimated IO load (which prevents activity, counteracted by favoring
     # larger and less frequent batches below)
-    adjusted_left =
-      left * @current_speed_factor * @checker.expected_slowdown
-    adjusted_filefrag_rate = time_left / adjusted_left
+    batch_target_for(files_left: left, time_left: time_left,
+                     global_slowdown: global_slowdown)
+  end
+
+  # Only makes sense for and supports time_left > 0 and files_left >= 0
+  def batch_target_for(files_left:, time_left:, global_slowdown: 1)
+    adjusted_left = files_left * global_slowdown
+    adjusted_filefrag_rate = adjusted_left / time_left
     slow_batch_size =
-      [ [ (MIN_DELAY_BETWEEN_FILEFRAGS / adjusted_filefrag_rate).ceil,
+      [ [ (MIN_DELAY_BETWEEN_FILEFRAGS * adjusted_filefrag_rate).ceil,
           MIN_FILES_BATCH_SIZE ].max, MAX_FILES_BATCH_SIZE ].min
     slow_batch_period =
-      [ [ slow_batch_size * adjusted_filefrag_rate,
+      [ [ slow_batch_size / adjusted_filefrag_rate,
           MIN_DELAY_BETWEEN_FILEFRAGS ].max, MAX_DELAY_BETWEEN_FILEFRAGS ].min
     [ slow_batch_size, slow_batch_period ]
   end
