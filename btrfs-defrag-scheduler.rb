@@ -1412,7 +1412,6 @@ class BtrfsDev
     @dir = dir
     @dir_slash = dir.end_with?("/") ? dir : "#{dir}/"
     @dirname = File.basename(dir)
-    detect_options(dev_fs_map)
     load_filecount
     @checker = UsagePolicyChecker.new(self)
     @files_state = FilesState.new(self)
@@ -1420,26 +1419,13 @@ class BtrfsDev
     # Tracking of file defragmentation
     @files_in_defragmentation = {}
     @stat_mutex = Mutex.new
-    @stat_thread = Thread.new { handle_stat_queue_progress }
 
+    # Init filefrag time tracking and rate with sensible values
     @average_file_time = 0
-    @slow_batch_size = 1
+    @slow_batch_size = MIN_FILES_BATCH_SIZE
     @slow_batch_period = MIN_DELAY_BETWEEN_FILEFRAGS
-    @current_speed_factor = 0
-
-    @slow_scan_thread = Thread.new {
-      info("## Beginning files list updater thread for #{dir}")
-      slow_files_state_update(first_pass: true)
-      loop { slow_files_state_update }
-    }
-
-    @defrag_thread = Thread.new {
-      loop do
-        defrag!
-        min_delay = delay_between_defrags
-        sleep delay_until_available_for_defrag(min_delay)
-      end
-    }
+    @current_speed_factor = 1
+    detect_options(dev_fs_map)
   end
 
   def detect_options(dev_fs_map)
@@ -1469,6 +1455,33 @@ class BtrfsDev
     end
     # Reset defrag_cmd if something changed (will be computed on first access)
     @defrag_cmd = nil if changed
+
+    # Note: @autodefrag == nil or true means we weren't processing
+    if autodefrag? && @autodefrag == false
+      info "= #{dir}: autodefrag on, ignoring now"
+      stop_processing
+      @autodefrag = true
+    elsif !autodefrag? && @autodefrag != false
+      start_processing
+      info "= #{dir}: autodefrag off, processing now"
+      @autodefrag = false
+    end
+  end
+
+  def start_processing
+    @stat_thread = Thread.new { handle_stat_queue_progress }
+    @slow_scan_thread = Thread.new do
+      info("## Beginning files list updater thread for #{dir}")
+      slow_files_state_update(first_pass: true)
+      loop { slow_files_state_update }
+    end
+    @defrag_thread = Thread.new do
+      loop do
+        defrag!
+        min_delay = delay_between_defrags
+        sleep delay_until_available_for_defrag(min_delay)
+      end
+    end
   end
 
   def stop_processing
@@ -1761,7 +1774,8 @@ class BtrfsDev
   end
 
   def skip_defrag?(filename)
-    filename.end_with?(" (deleted)") || blacklisted?(filename)
+    (@autodefrag != false) || filename.end_with?(" (deleted)") ||
+      blacklisted?(filename)
   end
 
   def mounted_with_compress?
@@ -1771,6 +1785,14 @@ class BtrfsDev
       !(option.start_with?("compress=") ||
         option.start_with?("compress-force="))
     end
+  end
+
+  def autodefrag?
+    options = mount_options
+    # Don't want to try to activate if we didn't get options
+    return true unless options
+
+    options.split(',').detect { |option| option == "autodefrag" }
   end
 
   def compression_algorithm
@@ -2089,27 +2111,27 @@ class BtrfsDevs
     dirs = File.open("/proc/mounts", "r") do |f|
       f.readlines.map { |line| line.split(' ') }
         .select { |ary| ary[2] == 'btrfs' }
-        .reject { |ary| ary[3].match(/autodefrag/) }
-    end.map { |ary| ary[1] }
+    end.map { |ary| [ ary[1], ary[3] ] }
     dev_fs_map = Hash.new { |hash, key| hash[key] = Set.new }
-    dirs.each { |dir| dev_fs_map[File.stat(dir).dev] << dir }
+    dirs.each { |dir, options| dev_fs_map[File.stat(dir).dev] << dir }
     @lock.synchronize do
-      umounted = @btrfs_devs.select { |dev| !dirs.include?(dev.dir) }
+      umounted =
+        @btrfs_devs.select { |dev| !dirs.map(&:first).include?(dev.dir) }
       umounted.each do |dev|
-        info "= #{dev.dir} mounted with autodefrag, disabling"
+        info "= #{dev.dir} not mounted, disabling"
         dev.stop_processing
       end
       @btrfs_devs.reject! { |dev| umounted.include?(dev) }
-      # Detect remount -o compress=... events
+
+      # Detect remount -o compress=... events and (no)autodefrag
       @btrfs_devs.each { |dev| dev.detect_options(dev_fs_map) }
-      dirs.each { |dir|
+      dirs.map(&:first).each do |dir|
         next unless top_volume?(dir)
         next if known?(dir)
         next if @btrfs_devs.map(&:dir).include?(dir)
-        info "= #{dir} mounted without autodefrag"
         @btrfs_devs << BtrfsDev.new(dir, dev_fs_map)
         @new_fs = true
-      }
+      end
       # Longer devs first to avoid a top dir matching a file
       # in a device mounted below
       @btrfs_devs.sort_by! { |dev| -dev.dir.size }
