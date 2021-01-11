@@ -1146,6 +1146,51 @@ class FilesState
     }
   end
 
+  def status
+    now = Time.now
+    return if @next_status_at > now
+    last_compressed_cost =
+      @fragmentation_info_mutex.synchronize {
+      @file_fragmentations[:compressed][0] ?
+        "%.2f" % @file_fragmentations[:compressed][0].fragmentation_cost :
+        "none"
+    }
+    last_uncompressed_cost =
+      @fragmentation_info_mutex.synchronize {
+      @file_fragmentations[:uncompressed][0] ?
+        "%.2f" % @file_fragmentations[:uncompressed][0].fragmentation_cost :
+        "none"
+    }
+    display_compressed =
+      @cost_achievement_history[:compressed].size > (COST_HISTORY_SIZE / 100)
+    if display_compressed
+      info(("# #{@btrfs.dirname} c: %.1f%%; " \
+            "Queued (c/u): %d/%d " \
+            "C: %.2f-%.2f,q:%s,t:%.2f " \
+            "U: %.2f-%.2f,q:%s,t:%.2f " \
+            "flw: %d; recent: %d, %s") %
+           [ type_share(:compressed) * 100,
+             queue_size(:compressed), queue_size(:uncompressed),
+             @initial_costs[:compressed], @average_costs[:compressed],
+             last_compressed_cost, @cost_thresholds[:compressed],
+             @initial_costs[:uncompressed], @average_costs[:uncompressed],
+             last_uncompressed_cost, @cost_thresholds[:uncompressed],
+             @written_files.size, @recently_defragmented.size,
+             @btrfs.scan_status ])
+    else
+      info(("# #{@btrfs.dirname} (no_comp); " \
+            "Queued: %d %.2f-%.2f,q:%s,t:%.2f " \
+            "flw: %d; recent: %d, %s") %
+           [ queue_size(:uncompressed),
+             @initial_costs[:uncompressed], @average_costs[:uncompressed],
+             last_uncompressed_cost, @cost_thresholds[:uncompressed],
+             @written_files.size, @recently_defragmented.size,
+             @btrfs.scan_status ])
+    end
+    # We might skip a few on occasion
+    @next_status_at += STATUS_PERIOD while now > @next_status_at
+  end
+
   private
   # MUST be protected by @fragmentation_info_mutex
   def next_available_type
@@ -1205,52 +1250,10 @@ class FilesState
     @last_writes_consolidated_at = Time.now
   end
 
-  def status
-    return if @next_status_at > Time.now
-    last_compressed_cost =
-      @fragmentation_info_mutex.synchronize {
-      @file_fragmentations[:compressed][0] ?
-        "%.2f" % @file_fragmentations[:compressed][0].fragmentation_cost :
-        "none"
-    }
-    last_uncompressed_cost =
-      @fragmentation_info_mutex.synchronize {
-      @file_fragmentations[:uncompressed][0] ?
-        "%.2f" % @file_fragmentations[:uncompressed][0].fragmentation_cost :
-        "none"
-    }
-    display_compressed =
-      @cost_achievement_history[:compressed].size > (COST_HISTORY_SIZE / 100)
-    if display_compressed
-      info(("# #{@btrfs.dirname} c: %.1f%%; " \
-            "Queued (c/u): %d/%d " \
-            "C: %.2f-%.2f,q:%s,t:%.2f " \
-            "U: %.2f-%.2f,q:%s,t:%.2f " \
-            "flw: %d; recent: %d, %s") %
-           [ type_share(:compressed) * 100,
-             queue_size(:compressed), queue_size(:uncompressed),
-             @initial_costs[:compressed], @average_costs[:compressed],
-             last_compressed_cost, @cost_thresholds[:compressed],
-             @initial_costs[:uncompressed], @average_costs[:uncompressed],
-             last_uncompressed_cost, @cost_thresholds[:uncompressed],
-             @written_files.size, @recently_defragmented.size,
-             @btrfs.scan_status ])
-    else
-      info(("# #{@btrfs.dirname} (no_comp); " \
-            "Queued: %d %.2f-%.2f,q:%s,t:%.2f " \
-            "flw: %d; recent: %d, %s") %
-           [ queue_size(:uncompressed),
-             @initial_costs[:uncompressed], @average_costs[:uncompressed],
-             last_uncompressed_cost, @cost_thresholds[:uncompressed],
-             @written_files.size, @recently_defragmented.size,
-             @btrfs.scan_status ])
-    end
-    @next_status_at += STATUS_PERIOD while Time.now > @next_status_at
-  end
-
   def thresholds_expired?
     @last_thresholds_at < (Time.now - COST_COMPUTE_DELAY)
   end
+
   # each achievement is [ initial_cost, final_cost, file_size ]
   # file_size is currently ignored (the target was jumping around on filesystems
   # with very diverse file sizes)
@@ -1562,6 +1565,8 @@ class BtrfsDev
     file_frag = get_next_file_to_defrag
     return unless file_frag
 
+    # To avoid long runs without status if there are files to defragment
+    @files_state.status
     shortname = file_frag.short_filename
     # We declare it defragmented ASAP to avoid a double queue
     @files_state.defragmented!(shortname)
@@ -1886,6 +1891,7 @@ class BtrfsDev
     @last_slow_scan_batch_start = Time.now
   end
 
+  # Deprecated, we use register_filefrag_speed to call set_slow_batch_target now
   # This is adaptative: we wait more if the queue is full and we can afford it
   # and speed up on empty queues using speed_factor
   # this returns how much to wait and modify the batch size
@@ -1989,6 +1995,10 @@ class BtrfsDev
         " ovf: %ds ago" % (Time.now - @files_state.last_queue_overflow_at).to_i
     end
     info msg
+    # We call it there too because if there isn't writes it isn't called
+    # so this ensures regular updates
+    @files_state.status
+  end
   end
 
   def scan_time
