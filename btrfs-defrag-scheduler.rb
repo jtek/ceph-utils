@@ -372,9 +372,11 @@ class UsagePolicyChecker
     [ available_at(expected_time, min_delay) - Time.now, 0 ].max
   end
 
+  # Returns how much we can expect IO to be slowed down by
+  # the IO bandwidth used based on recent usage
   # Cap the maximum value (avoids a division by 0)
   def expected_slowdown
-    io_load = [ conservative_load, 0.9 ].min
+    io_load = [ conservative_load, 0.99 ].min
     1.0 / (1 - io_load)
   end
 
