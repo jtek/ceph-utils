@@ -1750,19 +1750,14 @@ class BtrfsDev
           next
         end
         # Ignore tracked files
-        if @files_state.tracking_writes?(short_name)
-          recent += 1
-          next
-        end
+        (recent += 1; next) if @files_state.tracking_writes?(short_name)
+
         stat = File.stat(path) rescue nil
         # If we can't stat a file it's not processable
         next unless stat
         # Files small enough to fit a node can't be fragmented
-        if stat.size <= 4096
-          # We don't count it as if nothing changes it won't become a target
-          @considered -= 1
-          next
-        end
+        # We don't count it as if nothing changes it won't become a target
+        (@considered -= 1; next) if stat.size <= 4096
 
         filelist << path
         filelist_arg_length += (path.size + 1) # count space
@@ -1785,6 +1780,7 @@ class BtrfsDev
     queued += queue_slow_batch(filelist) if filelist.any?
     filecount_was_guessed = @filecount.nil?
     update_filecount(processed: 0, total: @considered)
+    files_state_update_report(queued, already_processed, recent)
     wait_slow_scan_restart(filecount_was_guessed)
   end
 
@@ -2067,23 +2063,29 @@ class BtrfsDev
   end
 
   def slow_status(queued, already_processed, recent)
-    return if @slow_status_at > Time.now
+    now = Time.now
+    return if @slow_status_at > now
     # This handles large slowdowns and suspends without spamming the log
-    @slow_status_at += SLOW_STATUS_PERIOD until @slow_status_at > Time.now
+    @slow_status_at += SLOW_STATUS_PERIOD until @slow_status_at > now
     msg = ("$ %s %d/%ds: %d queued / %d found, " \
            "%d recent defrag (fuzzy), %d changed recently") %
           [ @dirname, scan_time.to_i, SLOW_SCAN_PERIOD, queued,
             @considered, already_processed, recent ]
     if @files_state.last_queue_overflow_at &&
-       (@files_state.last_queue_overflow_at > (Time.now - SLOW_SCAN_PERIOD))
+       (@files_state.last_queue_overflow_at > (now - SLOW_SCAN_PERIOD))
       msg +=
-        " ovf: %ds ago" % (Time.now - @files_state.last_queue_overflow_at).to_i
+        " ovf: %ds ago" % (now - @files_state.last_queue_overflow_at).to_i
     end
     info msg
     # We call it there too because if there isn't writes it isn't called
     # so this ensures regular updates
     @files_state.status
   end
+
+  def files_state_update_report(queued, already_processed, recent)
+    @slow_status_at = Time.now
+    info "$# %s full scan report" % @dirname
+    slow_status(queued, already_processed, recent)
   end
 
   def scan_time
