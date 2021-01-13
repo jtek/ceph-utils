@@ -22,6 +22,12 @@ Recognized options:
     value passed to btrfs filesystem defrag "-t" parameter
     default: 32M
 
+--trees (-f)
+     fully defragment the read/write subvolume by launching an extent
+     and subvolume trees defragment after each full scan
+     WARNING: IO performance on HDD suffers greatly on large filesystems
+     default: disabled
+
 --verbose (-v)
     prints defragmention as it happens
 
@@ -66,6 +72,7 @@ opts =
                  [ '--debug', '-d', GetoptLong::NO_ARGUMENT ],
                  [ '--ignore-load', '-i', GetoptLong::NO_ARGUMENT ],
                  [ '--full-scan-time', '-s', GetoptLong::REQUIRED_ARGUMENT ],
+                 [ '--trees', '-f', GetoptLong::NO_ARGUMENT ],
                  [ '--target-extent-size', '-e',
                    GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--speed-multiplier', '-m', GetoptLong::REQUIRED_ARGUMENT ],
@@ -75,6 +82,7 @@ opts =
 
 # Latest recommendation from BTRFS developpers as of 2016
 $default_extent_size = '32M'
+$defragment_trees = false
 $verbose = false
 $debug = false
 $ignore_load = false
@@ -94,6 +102,8 @@ opts.each do |opt,arg|
   when '--full-scan-time'
     scan_time = arg.to_i
     help_exit if scan_time < 1
+  when '--trees'
+    $defragment_trees = true
   when '--target-extent-size'
     $default_extent_size = arg
   when '--speed-multiplier'
@@ -1481,7 +1491,10 @@ class BtrfsDev
     @slow_scan_thread = Thread.new do
       info("## Beginning files list updater thread for #{dir}")
       slow_files_state_update(first_pass: true)
-      loop { slow_files_state_update }
+      loop do
+        defragment_extent_and_subvolume_trees if $defragment_trees
+        slow_files_state_update
+      end
     end
     @defrag_thread = Thread.new do
       loop do
@@ -1589,6 +1602,25 @@ class BtrfsDev
     # Clear up any write detected concurrently
     @files_state.remove_tracking(shortname)
     stat_queue(file_frag)
+  end
+
+  # Experimental, the impact of this isn't depicted in the BTRFS documentation
+  # when defragmenting directories without -r we defragment additional
+  # structures: extent and subvolume trees. Can destroy performance on HDD
+  def defragment_extent_and_subvolume_trees
+    # Defragment root subvolume
+    run_with_device_usage do
+      info " - #{dir}: root subvolume extent and subvolume trees" if $verbose
+      system(*defrag_cmd, dir)
+      info " - #{dir}: root subvolume trees done" if $verbose
+    end
+    @rw_subvols.each do |subvol|
+      run_with_device_usage do
+        info " - #{dir}: #{subvol} extent and subvolume trees" if $verbose
+        system(*defrag_cmd, subvol)
+        info " - #{dir}: #{subvol} trees done" if $verbose
+      end
+    end
   end
 
   def human_delay(timestamp)
