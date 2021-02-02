@@ -1590,7 +1590,8 @@ class BtrfsDev
     @files_state.defragmented!(shortname)
     run_with_device_usage do
       if $verbose
-        mtime = File.mtime(file_frag.filename)
+        # Deal with file deletion race condition
+        mtime = File.mtime(file_frag.filename) rescue nil
         msg = " - %s: %s %s,%s,%.2f,%s" %
               [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
                 file_frag.human_size, file_frag.fragmentation_cost,
@@ -1624,6 +1625,8 @@ class BtrfsDev
   end
 
   def human_delay(timestamp)
+    return "unknown" unless timestamp
+
     delay_maps = { 24 * 3600 => "d",
                    3600      => "h",
                    60        => "m",
