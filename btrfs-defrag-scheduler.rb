@@ -755,7 +755,8 @@ class FileFragmentation
       frags = []
       btrfs.run_with_device_usage do
         start = Time.now
-        IO.popen([ "filefrag", "-v" ] + files, external_encoding: "BINARY") do |io|
+        IO.popen([ "filefrag", "-v" ] + files,
+                 external_encoding: "BINARY") do |io|
           parser = FilefragParser.new
           while line = io.gets do
             parser.add_line(line.chomp!)
@@ -1898,37 +1899,16 @@ class BtrfsDev
 
   # Return number of items queued
   def queue_slow_batch(filelist)
+    # Note: this tracks filefrag speed and adjust batch size/period
     frags = FileFragmentation.batch_init(filelist, self)
     @files_state.update_files(frags)
   end
 
   def wait_next_slow_scan_pass
     update_filecount(processed: @considered)
-    # adjust_slow_scan_batches
-    # set_slow_batch_target
     previous_batch_time = Time.now - @last_slow_scan_batch_start
     sleep [ @slow_batch_period - previous_batch_time, 0 ].max
     @last_slow_scan_batch_start = Time.now
-  end
-
-  # Deprecated, we use register_filefrag_speed to call set_slow_batch_target now
-  # This is adaptative: we wait more if the queue is full and we can afford it
-  # and speed up on empty queues using speed_factor
-  # this returns how much to wait and modify the batch size
-  def adjust_slow_scan_batches
-    # Count time spent processing files in previous batch to compensate for it
-    # Find out the average filefrag time per file over 2 minutes
-    # Favor last timings by giving them more weight
-    previous_batch_time = Time.now - @last_slow_scan_batch_start
-    previous_file_time = previous_batch_time / @slow_batch_size
-    weight = previous_batch_time / 120
-    @average_file_time = if weight >= 0.5
-                           (@average_file_time + previous_file_time) / 2
-                         else
-                           @average_file_time * (1 - weight) +
-                             previous_file_time * weight
-                         end
-    set_slow_batch_target
   end
 
   def init_slow_batch_target
@@ -1946,7 +1926,7 @@ class BtrfsDev
   end
 
   def slow_batch_target
-    # Compute and cache this before any return (it''s used for status)
+    # Compute and cache this before any return (it's used for status)
     @current_speed_factor = speed_factor
 
     # If there isn't enough time or data, speed up
