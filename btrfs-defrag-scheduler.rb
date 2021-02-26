@@ -196,8 +196,8 @@ SLOW_SCAN_CATCHUP_WAIT = slow_start
 SLOW_SCAN_SPEED_INCREASE_STEP = 2.0
 
 # These are used to compensate for deviation of the slow scan progress
-SLOW_SCAN_MAX_SPEED_FACTOR = 1.2
-SLOW_SCAN_MIN_SPEED_FACTOR = 0.1
+SLOW_SCAN_MAX_SPEED_FACTOR = 1.1
+SLOW_SCAN_MIN_SPEED_FACTOR = 0.02
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 0.25 / $speed_multiplier
 MAX_DELAY_BETWEEN_FILEFRAGS = 120 / $speed_multiplier
@@ -245,7 +245,7 @@ DEFRAG_BLACKLIST_FILE = ".no_defrag"
 
 $output_mutex = Mutex.new
 
-# Synchronize mulithreaded outputs
+# Synchronize multithreaded outputs
 module Outputs
   def short_tstamp
     Time.now.strftime("%Y%m%d %H%M%S")
