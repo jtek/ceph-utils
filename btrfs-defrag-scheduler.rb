@@ -392,6 +392,8 @@ class UsagePolicyChecker
   # Cap the maximum value (avoids a division by 0)
   def expected_slowdown
     io_load = [ conservative_load, 0.99 ].min
+    # Don't slow down for low loads
+    io_load = 0 if io_load < 0.1
     1.0 / (1 - io_load)
   end
 
