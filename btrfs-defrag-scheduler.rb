@@ -1941,11 +1941,12 @@ class BtrfsDev
 
     # Maintain cruising speed if we found the expected files and still have time
     left = slow_scan_expected_left
-    global_slowdown = @current_speed_factor * @checker.expected_slowdown
+    # accelerate/slowdown based on queue length and IO load
+    global_speed_factor = @current_speed_factor / @checker.expected_slowdown
     if left <= 0
       return batch_target_for(files_left: expected_filecount,
                               time_left: SLOW_SCAN_PERIOD,
-                              global_slowdown: global_slowdown)
+                              speed_factor: global_speed_factor)
     end
 
     # If we don't know the filesystem yet make a fast first pass
@@ -1955,19 +1956,13 @@ class BtrfsDev
     end
 
     ## Adaptive speed during normal scan
-
-    # This uses an estimation of the future batch_time (based on last batches)
-    # this will create larger batches than necessary after slowdowns
-    # but avoids solving a quadratic function, take the queue size, global load
-    # and estimated IO load (which prevents activity, counteracted by favoring
-    # larger and less frequent batches below)
     batch_target_for(files_left: left, time_left: time_left,
-                     global_slowdown: global_slowdown)
+                     speed_factor: global_speed_factor)
   end
 
   # Only makes sense for and supports time_left > 0 and files_left >= 0
-  def batch_target_for(files_left:, time_left:, global_slowdown: 1)
-    adjusted_left = files_left * global_slowdown
+  def batch_target_for(files_left:, time_left:, speed_factor: 1)
+    adjusted_left = files_left * speed_factor
     adjusted_filefrag_rate = adjusted_left / time_left
     slow_batch_size =
       [ [ (MIN_DELAY_BETWEEN_FILEFRAGS * adjusted_filefrag_rate).ceil,
