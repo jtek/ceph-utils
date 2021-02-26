@@ -417,35 +417,6 @@ class UsagePolicyChecker
     load
   end
 
-  # If expected_time is passed, this tries to remain below the thresholds
-  # until there isn't any tracked device_use left
-  # DEPRECATED for performance reasons: use delay_until_available
-  def available?(queue_fill_proportion, expected_time = 0)
-    cleanup
-
-    # Count usage in each time window
-    usage_sums = Hash[ DEVICE_USE_LIMITS.keys.map { |window|  [ window, 0 ] } ]
-    # This is non-optimal but it should involve a very small amount of data
-    @device_uses.each do |start, stop|
-      duration = stop - start
-      DEVICE_USE_LIMITS.each do |window, percent|
-        window_start = this_start + expected_time - window
-        # Count only overlapping time windows
-        if stop > window_start
-          if start > window_start
-            usage_sums[window] += duration
-          else
-            usage_sums[window] += (stop - window_start)
-          end
-        end
-        next if (usage_sums[window] + expected_time) <=
-                (window * DEVICE_USE_LIMITS[window])
-        return false
-      end
-    end
-    true
-  end
-
   private
 
   def add_usage(start, stop)
@@ -511,7 +482,7 @@ class UsagePolicyChecker
         max = middle
       end
     end
-    # We return the max to avoid any wait on available?
+    # We return the max to avoid the possibility of waiting twice
     info "## dichotomy: %d steps, %.2fs, result: %.2fs" %
          [ steps, (Time.now - start), max ] if $debug
     max
