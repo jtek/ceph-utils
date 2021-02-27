@@ -387,13 +387,19 @@ class UsagePolicyChecker
     [ available_at(expected_time, min_delay) - Time.now, 0 ].max
   end
 
+  # Might move the following to global constants/parameters later
+  # Cap the maximum value (avoids a division by 0 and limit the slowdown)
+  MAX_LOAD_FOR_SLOWDOWN = 0.95
+  # Don't slow down for low loads
+  LOAD_SLOWDOWN_LEVEL = 0.2
+  # Store this to avoid computing it everytime
+  CORRECTION_FACTOR = MAX_LOAD_FOR_SLOWDOWN / (1 - LOAD_SLOWDOWN_LEVEL)
   # Returns how much we can expect IO to be slowed down by
-  # the IO bandwidth used based on recent usage
-  # Cap the maximum value (avoids a division by 0)
+  # the IO bandwidth used based on recent usage to adapt the load
+  # we create ourselves
   def expected_slowdown
-    io_load = [ conservative_load, 0.99 ].min
-    # Don't slow down for low loads
-    io_load = 0 if io_load < 0.1
+    io_load = [ conservative_load - LOAD_SLOWDOWN_LEVEL, 0 ].max
+    io_load *= CORRECTION_FACTOR
     1.0 / (1 - io_load)
   end
 
@@ -1416,7 +1422,6 @@ class BtrfsDev
     @average_file_time = 0
     @slow_batch_size = MIN_FILES_BATCH_SIZE
     @slow_batch_period = MIN_DELAY_BETWEEN_FILEFRAGS
-    @current_speed_factor = 1
     detect_options(dev_fs_map)
   end
 
@@ -1686,9 +1691,9 @@ class BtrfsDev
                 " %.1f%%" % (100 * (@considered.to_f / @filecount) /
                             (scan_time.to_f / SLOW_SCAN_PERIOD)).to_f
               end
-    ("%d/%.2fs (%.3fs expected, IO %.2f%%) factor %.2f" %
+    ("%d/%.2fs (%.3fs expected, IO %.2f%%) speed:%.2f" %
      [ @slow_batch_size, @slow_batch_period, average_batch_time,
-       @checker.load * 100, @current_speed_factor ]) + percent
+       @checker.load * 100, global_speed_factor ]) + percent
   end
 
   def register_filefrag_speed(count, time)
@@ -1928,9 +1933,6 @@ class BtrfsDev
   end
 
   def slow_batch_target
-    # Compute and cache this before any return (it's used for status)
-    @current_speed_factor = speed_factor
-
     # If there isn't enough time or data, speed up
     time_left = scan_time_left # we need to cache it or it could become negative
     if time_left <= 0
@@ -1943,12 +1945,9 @@ class BtrfsDev
 
     # Maintain cruising speed if we found the expected files and still have time
     left = slow_scan_expected_left
-    # accelerate/slowdown based on queue length and IO load
-    global_speed_factor = @current_speed_factor / @checker.expected_slowdown
     if left <= 0
       return batch_target_for(files_left: expected_filecount,
-                              time_left: SLOW_SCAN_PERIOD,
-                              speed_factor: global_speed_factor)
+                              time_left: SLOW_SCAN_PERIOD)
     end
 
     # If we don't know the filesystem yet make a fast first pass
@@ -1958,13 +1957,12 @@ class BtrfsDev
     end
 
     ## Adaptive speed during normal scan
-    batch_target_for(files_left: left, time_left: time_left,
-                     speed_factor: global_speed_factor)
+    batch_target_for(files_left: left, time_left: time_left)
   end
 
   # Only makes sense for and supports time_left > 0 and files_left >= 0
-  def batch_target_for(files_left:, time_left:, speed_factor: 1)
-    adjusted_left = files_left * speed_factor
+  def batch_target_for(files_left:, time_left:)
+    adjusted_left = files_left * global_speed_factor
     adjusted_filefrag_rate = adjusted_left / time_left
     slow_batch_size =
       [ [ (MIN_DELAY_BETWEEN_FILEFRAGS * adjusted_filefrag_rate).ceil,
@@ -2018,9 +2016,14 @@ class BtrfsDev
     @filefrag_speed_increase_period = (SLOW_SCAN_PERIOD / 2) / steps_needed
   end
 
+  # accelerate/slowdown based on queue length and IO load
+  def global_speed_factor
+    queue_speed_factor / @checker.expected_slowdown
+  end
+
   # Adjust filefrag call speed based on amount of queued files
   # We slow the scan above QUEUE_PROPORTION_EQUILIBRIUM and speed up below
-  def speed_factor
+  def queue_speed_factor
     queue_proportion = @files_state.queue_fill_proportion
     factor = if queue_proportion > QUEUE_PROPORTION_EQUILIBRIUM
                # linear scale between SLOW_SCAN_MIN_SPEED_FACTOR and 1
@@ -2102,7 +2105,7 @@ class BtrfsDev
     adjusted_delay = bounded_delay * slowdown
     # Don't log small slowdowns
     if (adjusted_delay - bounded_delay) > 0.1
-      info "Slowing down (%.2fs → %.2fs) due to high load: %d%%" %
+      info "~ Increasing defrag delay (%.2fs → %.2fs) due to high load: %d%%" %
            [ bounded_delay, adjusted_delay, (slowdown * 100) ]
     end
     adjusted_delay
