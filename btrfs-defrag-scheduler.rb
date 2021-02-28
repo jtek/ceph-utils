@@ -1935,13 +1935,7 @@ class BtrfsDev
   def slow_batch_target
     # If there isn't enough time or data, speed up
     time_left = scan_time_left # we need to cache it or it could become negative
-    if time_left <= 0
-      while @speed_increases < (-time_left / filefrag_speed_increase_period)
-        increase_speed
-      end
-      # increase_speed modify the instance variables directly
-      return [ @slow_batch_size, @slow_batch_period ]
-    end
+    return catching_up_batch_target(time_left: time_left) if time_left <= 0
 
     # Maintain cruising speed if we found the expected files and still have time
     left = slow_scan_expected_left
@@ -1960,6 +1954,18 @@ class BtrfsDev
     batch_target_for(files_left: left, time_left: time_left)
   end
 
+  def catching_up_batch_target(time_left:)
+    while @speed_increases < (-time_left / filefrag_speed_increase_period)
+      @speed_increases += 1
+      info("= #{@dirname}: speeding filefrags up (%d) next in %s" %
+           [ @speed_increases, human_delay(filefrag_speed_increase_period) ])
+    end
+    # We increase the speed by SLOW_SCAN_SPEED_INCREASE_STEP each time
+    adjusted_left =
+      expected_filecount * SLOW_SCAN_SPEED_INCREASE_STEP ** @speed_increases
+    batch_target_for(files_left: adjusted_left, time_left: SLOW_SCAN_PERIOD)
+  end
+
   # Only makes sense for and supports time_left > 0 and files_left >= 0
   def batch_target_for(files_left:, time_left:)
     adjusted_left = files_left * global_speed_factor
@@ -1972,34 +1978,6 @@ class BtrfsDev
       [ [ slow_batch_size / adjusted_filefrag_rate.to_f,
           MIN_DELAY_BETWEEN_FILEFRAGS ].max, MAX_DELAY_BETWEEN_FILEFRAGS ].min
     [ slow_batch_size, slow_batch_period ]
-  end
-
-  def increase_speed
-    @speed_increases += 1
-    old_batch_size = @slow_batch_size
-    old_batch_period = @slow_batch_period
-    # Begin by reducing period
-    if (old_batch_period / SLOW_SCAN_SPEED_INCREASE_STEP) >=
-       MIN_DELAY_BETWEEN_FILEFRAGS
-      @slow_batch_period /= SLOW_SCAN_SPEED_INCREASE_STEP
-    else
-      @slow_batch_period = MIN_DELAY_BETWEEN_FILEFRAGS
-    end
-    # If not enough increase batch size
-    if @slow_batch_period == MIN_DELAY_BETWEEN_FILEFRAGS
-      remaining_speedup =
-        SLOW_SCAN_SPEED_INCREASE_STEP / (old_batch_period / @slow_batch_period)
-      if (old_batch_size * remaining_speedup) > MAX_FILES_BATCH_SIZE
-        @slow_batch_size = MAX_FILES_BATCH_SIZE
-      else
-        @slow_batch_size = (@slow_batch_size * remaining_speedup).to_i
-      end
-    end
-    unless [ old_batch_size, old_batch_period ] ==
-           [ MAX_FILES_BATCH_SIZE, MIN_DELAY_BETWEEN_FILEFRAGS ]
-      info("= #{@dirname}: accelerating filefrag rate to catch up (%d/%.2fs)" %
-           [ @slow_batch_size, @slow_batch_period ])
-    end
   end
 
   # We want to reach max filefrag speed in SLOW_BATCH_PERIOD / 2 if we spend
