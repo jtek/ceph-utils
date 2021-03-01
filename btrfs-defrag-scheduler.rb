@@ -1735,10 +1735,7 @@ class BtrfsDev
     begin
       Find.find(dir) do |path|
         slow_status(queued, already_processed, recent)
-        if prune?(path)
-          Find.prune
-          next
-        end
+        (Find.prune; next) if prune?(path)
 
         # ignore files with unparsable names
         short_name = short_filename(path) rescue ""
@@ -1747,10 +1744,11 @@ class BtrfsDev
         next unless File.exists?(path)
         next if !File.file?(path) || File.symlink?(path)
         @considered += 1
-        # Don't process during a resume
 
+        # Don't process during a resume
         if first_pass
           next if @considered < @last_processed
+
           info "= #{@dirname}: caught up #{@last_processed} files"
           # Avoid an abnormaly slow first batch
           @last_slow_scan_batch_start = Time.now
