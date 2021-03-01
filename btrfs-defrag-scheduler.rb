@@ -1718,7 +1718,7 @@ class BtrfsDev
       # Avoids hammering disk just after boot (see "--slow-start" option)
       sleep SLOW_SCAN_CATCHUP_WAIT
     end
-    @considered = 0; already_processed = 0; recent = 0; queued = 0
+    @considered = already_processed = recent = queued = batch_ignored = 0
     filelist = []
     filelist_arg_length = 0
     @slow_status_at ||= @last_slow_scan_batch_start = @scan_start = Time.now
@@ -1757,6 +1757,7 @@ class BtrfsDev
         # Ignore recently processed files
         if @files_state.recently_defragmented?(short_name)
           already_processed += 1
+          batch_ignored += 1
           next
         end
         # Ignore tracked files
@@ -1773,12 +1774,13 @@ class BtrfsDev
         filelist_arg_length += (path.size + 1) # count space
 
         # Stop and compute fragmentation for each completed batch
-        if (filelist.size >= @slow_batch_size) ||
-           (filelist_arg_length >= FILEFRAG_ARG_MAX)
-          queued += queue_slow_batch(filelist)
-          filelist = []; filelist_arg_length = 0
-          wait_next_slow_scan_pass
-        end
+        # count files ignored during this batch to avoid bypassing rate limit
+        next if ((filelist.size + batch_ignored) < @slow_batch_size) &&
+                (filelist_arg_length < FILEFRAG_ARG_MAX)
+
+        queued += queue_slow_batch(filelist)
+        filelist = []; filelist_arg_length = batch_ignored = 0
+        wait_next_slow_scan_pass
       end
     rescue => ex
       error("Couldn't process #{dir}: " \
