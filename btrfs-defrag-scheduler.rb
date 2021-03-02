@@ -1725,7 +1725,7 @@ class BtrfsDev
     @considered = already_processed = recent = queued = batch_ignored = 0
     filelist = []
     filelist_arg_length = 0
-    @slow_status_at ||= @last_slow_scan_batch_start = @scan_start = Time.now
+    @slow_status_at = @last_slow_scan_batch_start = @scan_start = Time.now
     # If we skip some files, we don't wait for the whole scan period either
     if first_pass && @filecount && @filecount > 0 && @last_processed > 0
       # compute an approximate time start from the work already done
@@ -1768,7 +1768,7 @@ class BtrfsDev
         (recent += 1; next) if @files_state.tracking_writes?(short_name)
 
         stat = File.stat(path) rescue nil
-        # If we can't stat a file it's not processable
+        # stat failed: file isn't processable (maybe deleted concurrently)
         next unless stat
         # Files small enough to fit a node can't be fragmented
         # We don't count it as if nothing changes it won't become a target
@@ -1789,8 +1789,8 @@ class BtrfsDev
     rescue => ex
       error("Couldn't process #{dir}: " \
             "#{ex}\n#{ex.backtrace.join("\n")}")
-      # Don't wait for a SLOW_SCAN_PERIOD
-      @slow_scan_stop_time = Time.now + MIN_DELAY_BETWEEN_FILEFRAGS
+      # Don't wait for a SLOW_SCAN_PERIOD but don't create load either
+      @slow_scan_stop_time = Time.now + MAX_DELAY_BETWEEN_FILEFRAGS
     end
     # Process remaining files to update
     queued += queue_slow_batch(filelist) if filelist.any?
@@ -1965,6 +1965,7 @@ class BtrfsDev
            [ @speed_increases, human_duration(filefrag_speed_increase_period) ])
     end
     # We increase the speed by SLOW_SCAN_SPEED_INCREASE_STEP each time
+    # this is setup to reuse batch_target_for
     adjusted_left =
       expected_filecount * SLOW_SCAN_SPEED_INCREASE_STEP ** @speed_increases
     batch_target_for(files_left: adjusted_left, time_left: SLOW_SCAN_PERIOD)
