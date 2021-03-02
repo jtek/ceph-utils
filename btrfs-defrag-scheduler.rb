@@ -1574,7 +1574,7 @@ class BtrfsDev
         msg = " - %s: %s %s,%s,%.2f,%s" %
               [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
                 file_frag.human_size, file_frag.fragmentation_cost,
-                human_delay(mtime) ]
+                human_delay_since(mtime) ]
         info(msg)
       end
       system(*defrag_cmd, file_frag.filename)
@@ -1603,18 +1603,22 @@ class BtrfsDev
     end
   end
 
-  def human_delay(timestamp)
+  def human_delay_since(timestamp)
     return "unknown" unless timestamp
 
+    delay = Time.now - timestamp
+    human_duration(delay)
+  end
+
+  def human_duration(duration)
     delay_maps = { 24 * 3600 => "d",
                    3600      => "h",
                    60        => "m",
                    1         => "s",
                    nil       => "now" }
-    delay = Time.now - timestamp
     delay_maps.each do |amount, suffix|
       return suffix unless amount
-      return "%.1f%s" % [ delay / amount, suffix ] if delay >= amount
+      return "%.1f%s" % [ duration / amount, suffix ] if duration >= amount
     end
   end
 
@@ -1958,7 +1962,7 @@ class BtrfsDev
     while @speed_increases < (-time_left / filefrag_speed_increase_period)
       @speed_increases += 1
       info("= #{@dirname}: speeding filefrags up (%d) next in %s" %
-           [ @speed_increases, human_delay(filefrag_speed_increase_period) ])
+           [ @speed_increases, human_duration(filefrag_speed_increase_period) ])
     end
     # We increase the speed by SLOW_SCAN_SPEED_INCREASE_STEP each time
     adjusted_left =
