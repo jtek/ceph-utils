@@ -15,7 +15,8 @@ Recognized options:
     This message
 
 --full-scan-time <value> (-s)
-    Number of hours over which to scan the filesystem (>= 1)
+    Number of hours over which to scan the filesystem (>= 0.05)
+    values < 1 only meaningful for developpers
     default: 4 x 7 x 24 (4 weeks)
 
 --target-extent-size <value> (-e)
@@ -100,8 +101,8 @@ opts.each do |opt,arg|
   when '--debug'
     $debug = true
   when '--full-scan-time'
-    scan_time = arg.to_i
-    help_exit if scan_time < 1
+    scan_time = arg.to_f
+    help_exit if scan_time < 0.05
   when '--trees'
     $defragment_trees = true
   when '--target-extent-size'
