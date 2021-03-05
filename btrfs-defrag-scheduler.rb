@@ -2086,7 +2086,7 @@ class BtrfsDev
     # This handles large slowdowns and suspends without spamming the log
     @slow_status_at += SLOW_STATUS_PERIOD until @slow_status_at > now
     msg = ("$ %s %d/%ds: %d queued / %d found, " \
-           "%d recent defrag (fuzzy), %d changed recently") %
+           "%d recent defrag (fuzzy), %d tracked") %
           [ @dirname, scan_time.to_i, SLOW_SCAN_PERIOD, @queued,
             @considered, already_processed, recent ]
     if @files_state.last_queue_overflow_at &&
