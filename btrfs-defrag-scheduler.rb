@@ -194,7 +194,7 @@ SLOW_SCAN_CATCHUP_WAIT = slow_start
 # If the scan didn't finish after the initial period by how much do we speed up
 # this will be repeated until reaching max speed SLOW_SCAN_PERIOD / 2 after
 # the initial period
-SLOW_SCAN_SPEED_INCREASE_STEP = 2.0
+SLOW_SCAN_SPEED_INCREASE_STEP = 1.1
 
 # These are used to compensate for deviation of the slow scan progress
 SLOW_SCAN_MAX_SPEED_FACTOR = 1.1
