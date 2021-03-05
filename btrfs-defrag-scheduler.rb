@@ -1996,15 +1996,19 @@ class BtrfsDev
   end
 
   def catching_up_batch_target(time_left:)
+    speedup = false
     while @speed_increases < (-time_left / filefrag_speed_increase_period)
       @speed_increases += 1
-      info("= #{@dirname}: speeding filefrags up (%d) next in %s" %
-           [ @speed_increases, human_duration(filefrag_speed_increase_period) ])
+      # We increase the speed by SLOW_SCAN_SPEED_INCREASE_STEP each time
+      speedup = true
     end
-    # We increase the speed by SLOW_SCAN_SPEED_INCREASE_STEP each time
-    # this is setup to reuse batch_target_for
-    adjusted_left =
-      expected_filecount * SLOW_SCAN_SPEED_INCREASE_STEP ** @speed_increases
+    adjusted_speed = SLOW_SCAN_SPEED_INCREASE_STEP ** @speed_increases
+    if speedup
+      info("= #{@dirname}: speedup scan to catch up (x%.2f) for next %s" %
+           [ adjusted_speed, human_duration(filefrag_speed_increase_period) ])
+    end
+    # setup an adjuste left count to reuse batch_target_for code
+    adjusted_left = expected_filecount * adjusted_speed
     batch_target_for(files_left: adjusted_left, time_left: SLOW_SCAN_PERIOD)
   end
 
