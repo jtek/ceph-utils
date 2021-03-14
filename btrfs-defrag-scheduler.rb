@@ -1699,7 +1699,7 @@ class BtrfsDev
                 " %.1f%%" % (100 * (@considered.to_f / @filecount) /
                             (scan_time.to_f / SLOW_SCAN_PERIOD)).to_f
               end
-    ("%d/%.2fs (%.3fs expected, IO %.2f%%) speed:%.2f" %
+    ("%d/%.3fs (%.3fs expected, IO %.0f%%) speed:%.2f" %
      [ @slow_batch_size, @slow_batch_period, average_batch_time,
        @checker.load * 100, global_speed_factor ]) + percent
   end
