@@ -135,7 +135,7 @@ end
 COST_HISTORY_SIZE = 2000
 # Tune this to change the effort made to defragment (1.0: max effort)
 # this is a compromise: some files are written to regularly, you don't want to
-# defragment then as soon as they begin to fragment themselves or you will have
+# defragment them as soon as they begin to fragment themselves or you will have
 # to defragment them very often, generating I/O load that would defeat the
 # purpose of defragmenting (keeping latencies low)
 MIN_FRAGMENTATION_THRESHOLD = 1.05
@@ -153,8 +153,9 @@ FILECOUNT_SERIALIZE_DELAY = 300
 
 # How many files do we queue for defragmentation
 MAX_QUEUE_LENGTH = 2000
-# What is our target queue length proportion where our speed is nominal
-# (speedup above it, slowdown under it)
+# What is our target queue length proportion where our defragmentation rate
+# and scan rate are nominal
+# speed up defragmentation and slow down scan above it and inverse under it
 QUEUE_PROPORTION_EQUILIBRIUM = 0.025
 # How much device time the program is allowed to use
 # (values when queue == MAX_QUEUE_LENGTH)
