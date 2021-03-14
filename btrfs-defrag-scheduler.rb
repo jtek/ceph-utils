@@ -1658,11 +1658,12 @@ class BtrfsDev
     return @defrag_cmd if @defrag_cmd
     cmd =
       [ "btrfs", "filesystem", "defragment", "-t", $default_extent_size, "-f" ]
-    if @compression_algo
-      short_algo = @compression_algo.gsub(/:.*$/, '')
-      cmd << "-c#{short_algo}"
-    end
+    cmd << "-c#{comp_algo_param_value}" if @compression_algo
     @defrag_cmd = cmd
+  end
+
+  def comp_algo_param_value
+    @compression_algo.gsub(/:.*$/, '')
   end
 
   # We prefer to store short filenames to free memory
