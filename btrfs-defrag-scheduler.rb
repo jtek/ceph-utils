@@ -856,9 +856,10 @@ class FilesState
          (serialized_data["bits_per_entry"] != BITS_PER_ENTRY) ||
          ((serialized_data["bitarray"].size * ENTRIES_PER_BYTE) != MAX_ENTRIES)
         dump = serialized_data && serialized_data.reject{|k,v| k == "bitarray"}
-        error "Invalid serialized data: \n#{dump.inspect}"
+        info "Invalid serialized data: \n#{dump.inspect}"
         @bitarray =
-          "\0".force_encoding(Encoding::ASCII_8BIT) * (MAX_ENTRIES / ENTRIES_PER_BYTE)
+          "\0".force_encoding(Encoding::ASCII_8BIT) *
+          (MAX_ENTRIES / ENTRIES_PER_BYTE)
         @last_tick = Time.now
         @size = 0
         return
