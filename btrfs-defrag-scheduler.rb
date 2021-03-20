@@ -1778,7 +1778,7 @@ class BtrfsDev
       case @pass
       when :none
         @pass = :first
-        info("= #{@dev.dirname}: skipping #{@last_processed} files " \
+        info("= #{@dev.dirname}: skipping #{@processed} files " \
              "in #{SLOW_SCAN_CATCHUP_WAIT}s")
         # Avoids hammering disk just after boot (see "--slow-start" option)
         sleep SLOW_SCAN_CATCHUP_WAIT
@@ -1992,7 +1992,6 @@ class BtrfsDev
     @rate_controller.init_new_scan
     @considered = already_processed = recent = @queued = 0
     @slow_status_at = @last_slow_scan_batch_start = Time.now
-    # Note @last_processed == 0 unless first_pass after interrupted pass
     @batch = Batch.new(batch_size: @rate_controller.slow_batch_size) do
       queue_slow_batch
       @rate_controller.wait_next_slow_scan_pass(considered: @considered)
