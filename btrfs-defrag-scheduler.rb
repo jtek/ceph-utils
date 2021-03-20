@@ -198,7 +198,7 @@ SLOW_SCAN_CATCHUP_WAIT = slow_start
 SLOW_SCAN_SPEED_INCREASE_STEP = 1.1
 
 # These are used to compensate for deviation of the slow scan progress
-SLOW_SCAN_MAX_SPEED_FACTOR = 1.1
+SLOW_SCAN_MAX_SPEED_FACTOR = 1.2
 SLOW_SCAN_MIN_SPEED_FACTOR = 0.02
 # Sleep constraints between 2 filefrags call in full refresh thread
 MIN_DELAY_BETWEEN_FILEFRAGS = 0.25 / $speed_multiplier
