@@ -252,19 +252,13 @@ module Outputs
     Time.now.strftime("%Y%m%d %H%M%S")
   end
   def error(msg)
-    $output_mutex.synchronize {
-      STDERR.puts "#{short_tstamp}: ERROR, #{msg}"
-    }
+    $output_mutex.synchronize { STDERR.puts "#{short_tstamp}: ERROR, #{msg}" }
   end
   def info(msg)
-    $output_mutex.synchronize {
-      STDOUT.puts "#{short_tstamp}: #{msg}"
-    }
+    $output_mutex.synchronize { STDOUT.puts "#{short_tstamp}: #{msg}" }
   end
   def print(msg)
-    $output_mutex.synchronize {
-      STDOUT.print "#{short_tstamp}: #{msg}"
-    }
+    $output_mutex.synchronize { STDOUT.print "#{short_tstamp}: #{msg}" }
   end
 end
 
