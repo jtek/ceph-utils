@@ -156,9 +156,8 @@ MAX_QUEUE_LENGTH = 2000
 # What is our target queue length proportion where our defragmentation rate
 # and scan rate are nominal
 # speed up defragmentation and slow down scan above it and inverse under it
-QUEUE_PROPORTION_EQUILIBRIUM = 0.025
-# How much device time the program is allowed to use
-# (values when queue == MAX_QUEUE_LENGTH)
+QUEUE_PROPORTION_EQUILIBRIUM = 0.05
+# How much device time the program is allowed to use (including filefrag calls)
 # time window => max_device_use_ratio
 # When adapting to load, time windows are enlarged when load is above "normal"
 DEVICE_USE_LIMITS = {
