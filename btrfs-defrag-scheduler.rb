@@ -200,7 +200,7 @@ SLOW_SCAN_SPEED_INCREASE_STEP = 1.1
 SLOW_SCAN_MAX_SPEED_FACTOR = 1.5
 SLOW_SCAN_MIN_SPEED_FACTOR = 0.02
 # Sleep constraints between 2 filefrags call in full refresh thread
-MIN_DELAY_BETWEEN_FILEFRAGS = 0.25 / $speed_multiplier
+MIN_DELAY_BETWEEN_FILEFRAGS = 0.1 / $speed_multiplier
 MAX_DELAY_BETWEEN_FILEFRAGS = 120 / $speed_multiplier
 # Batch size constraints for full refresh thread
 # don't make it so large that at cruising speed it could overflow the queue
