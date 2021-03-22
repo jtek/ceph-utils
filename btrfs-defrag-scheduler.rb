@@ -159,11 +159,16 @@ MAX_QUEUE_LENGTH = 2000
 QUEUE_PROPORTION_EQUILIBRIUM = 0.05
 # How much device time the program is allowed to use (including filefrag calls)
 # time window => max_device_use_ratio
-# When adapting to load, time windows are enlarged when load is above "normal"
+# the allowed use_ratio is reduced when:
+# - system load exceeds target (to avoid avalanche effects)
+# - the defrag queue is near empty (to avoid fast successions of defrag when
+#   possible)
 DEVICE_USE_LIMITS = {
-  0.5 => 0.5 * $speed_multiplier,
-  3 => 0.45 * $speed_multiplier,
-  11 => 0.4 * $speed_multiplier,
+  0.2 => 0.75 * $speed_multiplier,
+  0.5 => 0.6 * $speed_multiplier,
+  3 => 0.5 * $speed_multiplier,
+  11 => 0.45 * $speed_multiplier,
+  30 => 0.4 * $speed_multiplier
 }
 EXPECTED_COMPRESS_RATIO = 0.5
 
@@ -211,9 +216,10 @@ MIN_FILES_BATCH_SIZE = 1
 # We ignore files recently defragmented for 12 hours
 IGNORE_AFTER_DEFRAG_DELAY = 12 * 3600
 
-MIN_DELAY_BETWEEN_DEFRAGS = 0.05
+#MIN_DELAY_BETWEEN_DEFRAGS = 0.05
 # Actually max delay before checking when to defrag next
-MAX_DELAY_BETWEEN_DEFRAGS = 30
+#MAX_DELAY_BETWEEN_DEFRAGS = 15
+MIN_QUEUE_DEFRAG_SPEED_FACTOR = 0.2
 
 # How often do we dump a status update
 STATUS_PERIOD = 120 # every 2 minutes
@@ -399,8 +405,9 @@ class UsagePolicyChecker
     result
   end
 
-  def delay_until_available(expected_time = 0, min_delay = 0)
-    [ available_at(expected_time, min_delay) - Time.now, 0 ].max
+  def delay_until_available(expected_time: 0, min_delay: 0, use_limit_factor: 1)
+    [ available_at(expected_time: expected_time, min_delay: min_delay,
+                   use_limit_factor: use_limit_factor) - Time.now, 0 ].max
   end
 
   # Might move the following to global constants/parameters later
@@ -447,31 +454,29 @@ class UsagePolicyChecker
     @device_uses << [ start, stop ]
   end
 
-  def available_at(expected_time = 0, min_delay = 0)
+  def available_at(expected_time: 0, min_delay: 0, use_limit_factor:)
     cleanup
     DEVICE_USE_LIMITS.keys.map do |window|
-      next_available_for(window, expected_time, min_delay)
+      next_available_for(window, expected_time, min_delay, use_limit_factor)
     end.max
   end
 
   def cleanup
     # Adapt period to current load, keep a buffer to anticipate rise in load
-    largest_window = 2 * LOAD_WINDOW * LoadCheck.instance.slowdown_ratio
     this_start = Time.now
     # Cleanup the device uses
     @device_uses.shift while (first = @device_uses.first) &&
-                             first[1] < (this_start - largest_window)
+                             first[1] < (this_start - LOAD_WINDOW)
   end
 
-  def next_available_for(window, expected_time, min_delay)
+  def next_available_for(window, expected_time, min_delay, use_limit_factor)
     now = Time.now
     return now + min_delay if window <= min_delay
-    target = DEVICE_USE_LIMITS[window]
-    slowdown = LoadCheck.instance.slowdown_ratio
-    max_delay = window * slowdown
+    use_factor = use_limit_factor / LoadCheck.instance.slowdown_ratio
+    target = DEVICE_USE_LIMITS[window] * use_factor
     # When will it reach the target use_ratio ?
-    return now + dichotomy((min_delay..max_delay), target, 0.001) do |wait|
-      use_ratio(now + wait - max_delay, max_delay, expected_time)
+    return now + dichotomy((min_delay..window), target, 0.001) do |wait|
+      use_ratio(now + wait - window, window, expected_time)
     end
   end
 
@@ -1494,8 +1499,8 @@ class BtrfsDev
     @defrag_thread = Thread.new do
       loop do
         defrag!
-        min_delay = delay_between_defrags
-        sleep delay_until_available_for_defrag(min_delay)
+        #min_delay = delay_between_defrags
+        sleep delay_until_available_for_defrag#(min_delay)
       end
     end
   end
@@ -2170,27 +2175,38 @@ class BtrfsDev
   end
 
   # Don't loop on defrag aggressively if there isn't much to be done
-  def delay_between_defrags
-    # At QUEUE_PROPORTION_EQUILIBRIUM we reach the max speed for defrags
-    proportional_delay =
-      @files_state.queue_fill_proportion / QUEUE_PROPORTION_EQUILIBRIUM *
-      (MAX_DELAY_BETWEEN_DEFRAGS - MIN_DELAY_BETWEEN_DEFRAGS)
-    bounded_delay = [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
-                      MIN_DELAY_BETWEEN_DEFRAGS ].max
-    slowdown = LoadCheck.instance.slowdown_ratio
-    return bounded_delay if slowdown == 1
-    adjusted_delay = bounded_delay * slowdown
-    # Don't log small slowdowns
-    if (adjusted_delay - bounded_delay) > 0.1
-      info "~ Increasing defrag delay (%.2fs → %.2fs) due to high load: %d%%" %
-           [ bounded_delay, adjusted_delay, (slowdown * 100) ]
-    end
-    adjusted_delay
+  # def delay_between_defrags
+  #   # At QUEUE_PROPORTION_EQUILIBRIUM we reach the max speed for defrags
+  #   proportional_delay =
+  #     @files_state.queue_fill_proportion / QUEUE_PROPORTION_EQUILIBRIUM *
+  #     (MAX_DELAY_BETWEEN_DEFRAGS - MIN_DELAY_BETWEEN_DEFRAGS)
+  #   bounded_delay = [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
+  #                     MIN_DELAY_BETWEEN_DEFRAGS ].max
+  #   slowdown = LoadCheck.instance.slowdown_ratio
+  #   return bounded_delay if slowdown == 1
+  #   adjusted_delay = bounded_delay * slowdown
+  #   # Don't log small slowdowns
+  #   if (adjusted_delay - bounded_delay) > 0.1
+  #     info "~ Increasing defrag delay (%.2fs → %.2fs) due to high load: %d%%" %
+  #          [ bounded_delay, adjusted_delay, (slowdown * 100) ]
+  #   end
+  #   adjusted_delay
+  # end
+
+  def delay_until_available_for_defrag#(min_delay)
+    @checker.delay_until_available(expected_time:
+                                     @files_state.next_defrag_duration,
+                                   use_limit_factor:
+                                     low_queue_defrag_speed_factor)
+                                   # min_delay: min_delay)
   end
 
-  def delay_until_available_for_defrag(min_delay)
-    @checker.delay_until_available(@files_state.next_defrag_duration,
-                                   min_delay)
+  # When the queue is low we slow down defrags
+  def low_queue_defrag_speed_factor
+    # At QUEUE_PROPORTION_EQUILIBRIUM we reach the max speed for defrags
+    # But don't go below MIN_QUEUE_DEFRAG_SPEED_FACTOR
+    [ [ @files_state.queue_fill_proportion / QUEUE_PROPORTION_EQUILIBRIUM,
+        1 ].min, MIN_QUEUE_DEFRAG_SPEED_FACTOR ].max
   end
 
   def load_exceptions
