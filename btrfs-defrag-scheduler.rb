@@ -1986,7 +1986,7 @@ class BtrfsDev
     @considered = already_processed = recent = @queued = 0
     @slow_status_at = @last_slow_scan_batch_start = Time.now
     @batch = Batch.new(batch_size: @rate_controller.slow_batch_size) do
-      queue_slow_batch
+      queue_slow_scan_batch
       @rate_controller.wait_next_slow_scan_pass(considered: @considered)
       @rate_controller.slow_batch_size
     end
@@ -2033,7 +2033,7 @@ class BtrfsDev
       @rate_controller.target_stop_time = Time.now + MAX_DELAY_BETWEEN_FILEFRAGS
     end
     # Process remaining files to update
-    queue_slow_batch
+    queue_slow_scan_batch
     # Store the amount of files found
     @rate_controller.update_filecount(processed: 0, total: @considered)
     files_state_update_report(already_processed, recent)
@@ -2114,7 +2114,7 @@ class BtrfsDev
     mount_line && mount_line.match(/\S+\s\S+\sbtrfs\s(\S+)/)[1]
   end
 
-  def queue_slow_batch
+  def queue_slow_scan_batch
     # Note: this tracks filefrag speed and adjust batch size/period
     frags = FileFragmentation.batch_init(@batch.filelist, self)
     @queued += @files_state.update_files(frags)
