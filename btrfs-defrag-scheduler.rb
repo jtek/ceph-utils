@@ -1081,7 +1081,7 @@ class FilesState
       rate += if key_history.size == COST_HISTORY_SIZE
                 COST_HISTORY_SIZE.to_f / [ (now - key_history.first[3]), 1 ].max
               else
-                key_history.size / COST_HISTORY_TTL
+                key_history.size.to_f / COST_HISTORY_TTL
               end
     end
     rate
