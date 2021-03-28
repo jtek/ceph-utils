@@ -863,11 +863,14 @@ class FilesState
     # to avoid spikes on rotations
     ROTATE_GROUPS = 2 ** 16
     ROTATE_SEGMENT = ROTATING_PERIOD.to_f / ROTATE_GROUPS
+    # Over which period approximately do we track the event rate
+    EVENT_RATE_PERIOD = 30 * 60
 
     attr_reader :size
 
     def initialize(serialized_data = nil)
-      @tick_interval = IGNORE_AFTER_DEFRAG_DELAY / ((2 ** BITS_PER_ENTRY) - 1)
+      @tick_interval =
+        IGNORE_AFTER_DEFRAG_DELAY.to_f / ((2 ** BITS_PER_ENTRY) - 1)
       # Reset recent data if rules changed or invalid serialization format
       if !serialized_data || !serialized_data["ttl"] ||
          (serialized_data["ttl"] > IGNORE_AFTER_DEFRAG_DELAY) ||
@@ -886,6 +889,10 @@ class FilesState
       @last_tick = serialized_data["last_tick"]
       @size = serialized_data["size"]
       @bitarray.force_encoding(Encoding::ASCII_8BIT)
+      @tick_events = 0
+      # Track approximate events per segment
+      @average_tick_events = 0.0
+      @last_tick_events_weight = @tick_interval / EVENT_RATE_PERIOD
     end
 
     # Expects a string
@@ -907,7 +914,7 @@ class FilesState
         byte += value
       end
       @bitarray.setbyte(position, byte)
-      @size += 1 if previous_value == 0
+      register_new_object_event if previous_value == 0
     end
 
     def recent?(object_id)
@@ -929,7 +936,16 @@ class FilesState
       }
     end
 
+    def average_object_rate
+      @average_tick_events / @tick_interval
+    end
+
     private
+
+    def register_new_object_event
+      @size += 1
+      @tick_events += 1
+    end
 
     def advance_clock_when_needed
       tick! while (@last_tick + @tick_interval) < Time.now
@@ -939,6 +955,10 @@ class FilesState
     def tick!
       info "## FuzzyEventTracker size was: #{size}" if $debug
       @last_tick += @tick_interval
+      @average_tick_events =
+        @average_tick_events * (1 - @last_tick_events_weight) +
+        @tick_events * @last_tick_events_weight
+      @tick_events = 0
       return if @size == 0 # nothing to be done
       @size = 0
       @bitarray.size.times do |byte_idx|
@@ -1040,6 +1060,12 @@ class FilesState
   def recently_defragmented?(shortname)
     @fragmentation_info_mutex.synchronize do
       @recently_defragmented.recent?(shortname)
+    end
+  end
+
+  def defragmentation_rate
+    @fragmentation_info_mutex.synchronize do
+      @recently_defragmented.average_object_rate
     end
   end
 
