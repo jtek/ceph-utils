@@ -1433,9 +1433,10 @@ class BtrfsDev
     @dir = dir
     @dir_slash = dir.end_with?("/") ? dir : "#{dir}/"
     @dirname = File.basename(dir)
-    @rate_controller = FilesStateRateController.new(dev: self)
     @checker = UsagePolicyChecker.new(self)
     @files_state = FilesState.new(self)
+    # Note: @files_state MUST be created before @rate_controller
+    @rate_controller = FilesStateRateController.new(dev: self)
 
     # Tracking of file defragmentation
     @files_in_defragmentation = {}
@@ -1771,6 +1772,10 @@ class BtrfsDev
       @pass = :none
       @dev = dev
       load_filecount
+      # Need to define default values until init_new_scan (some other threads
+      # ask us about current rate status)
+      @target_stop_time = Time.now + SLOW_SCAN_PERIOD
+      init_slow_batch_target
     end
 
     def init_new_scan
