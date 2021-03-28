@@ -132,7 +132,8 @@ end
 # Used to remember how low the cost is brought down
 # higher values means more stable behaviour in the effort made
 # to defragment
-COST_HISTORY_SIZE = 2000
+COST_HISTORY_SIZE = 500
+COST_HISTORY_TTL = 7200
 # Tune this to change the effort made to defragment (1.0: max effort)
 # this is a compromise: some files are written to regularly, you don't want to
 # defragment them as soon as they begin to fragment themselves or you will have
@@ -839,7 +840,7 @@ class FilesState
   include Outputs
   include HashEntrySerializer
 
-  TYPES = [ :compressed, :uncompressed ]
+  TYPES = [ :uncompressed, :compressed ]
   attr_reader :last_queue_overflow_at
 
   # Track recent events using a compact bitarray indexed by hashes of objects
@@ -944,6 +945,7 @@ class FilesState
     end
 
     def average_object_rate
+      advance_clock_when_needed
       @average_tick_events / @tick_interval
     end
 
@@ -1026,7 +1028,7 @@ class FilesState
     }
     @tracker_mutex = Mutex.new
     load_recently_defragmented
-    load_history
+    load_cost_history
 
     @written_files = {}
     @writes_mutex = Mutex.new
@@ -1071,9 +1073,18 @@ class FilesState
   end
 
   def defragmentation_rate
-    @fragmentation_info_mutex.synchronize do
-      @recently_defragmented.average_object_rate
+    cleanup_cost_history
+    rate = 0
+    now = Time.now.to_i
+    TYPES.each do |key|
+      key_history = @cost_achievement_history[key]
+      rate += if key_history.size == COST_HISTORY_SIZE
+                COST_HISTORY_SIZE.to_f / [ (now - key_history.first[3]), 1 ].max
+              else
+                key_history.size / COST_HISTORY_TTL
+              end
     end
+    rate
   end
 
   # TODO: maybe only track recent defragmentations for WriteEvents-triggered
@@ -1125,9 +1136,10 @@ class FilesState
       cleanup_files
       # Return number of queued items, ignoring duplicates
       (updated_names - duplicate_names).select do |n|
-        # Use uncompressed first as it seems the most common case
-        @file_fragmentations[:uncompressed].any? { |f| f.short_filename == n } ||
-        @file_fragmentations[:compressed].any? { |f| f.short_filename == n }
+        # Note: uses uncompressed first as it seems the most common case
+        TYPES.any? do |type|
+          @file_fragmentations[type].any? { |f| f.short_filename == n }
+        end
       end.size
     end
   end
@@ -1152,8 +1164,7 @@ class FilesState
   def historize_cost_achievement(file_frag, initial_cost, final_cost, size)
     key = file_frag.majority_compressed? ? :compressed : :uncompressed
     history = @cost_achievement_history[key]
-    history << [ initial_cost, final_cost, size ]
-    history.shift if history.size > COST_HISTORY_SIZE
+    history << [ initial_cost, final_cost, size, Time.now.to_i ]
     compute_thresholds
     serialize_history
   end
@@ -1210,9 +1221,8 @@ class FilesState
         "%.2f" % @file_fragmentations[:uncompressed][0].fragmentation_cost :
         "none"
     }
-    display_compressed =
-      @cost_achievement_history[:compressed].size > (COST_HISTORY_SIZE / 100)
-    if display_compressed
+    cleanup_cost_history
+    if @cost_achievement_history[:compressed].any?
       info(("# #{@btrfs.dirname} c: %.1f%%; " \
             "Queued (c/u): %d/%d " \
             "C: %.2f>%.2f,q:%s,t:%.2f " \
@@ -1308,8 +1318,15 @@ class FilesState
   # with very diverse file sizes)
   def compute_thresholds
     return unless thresholds_expired?
-    TYPES.each { |key|
-      size = @cost_achievement_history[key].size
+    cleanup_cost_history
+    TYPES.each do |key|
+      key_history = @cost_achievement_history[key]
+      size = key_history.size
+      if size == 0
+        @cost_thresholds[key] = MIN_FRAGMENTATION_THRESHOLD
+        @average_costs[key] = @initial_costs[key] = 1.0
+        next
+      end
       # We want a weighted percentile, higher weight for more recent costs
       threshold_weight = ((size + 1) * size) / 2
       # If we used the file size:
@@ -1319,9 +1336,8 @@ class FilesState
       threshold_weight *= (COST_THRESHOLD_PERCENTILE.to_f / 100)
       # Order by final_cost, transform weight to be between 1 and size
       ordered_history =
-        @cost_achievement_history[key].each_with_index.map { |costs, index|
-        [ costs, index + 1 ]
-      }.sort_by { |a| a[0][1] }
+        key_history.each_with_index.map { |costs, index| [ costs, index + 1 ] }
+                                   .sort_by { |a| a[0][1] }
       total_weight = 0
       final_accu = 0
       initial_accu = 0
@@ -1344,7 +1360,7 @@ class FilesState
       end
       @average_costs[key] = final_accu / total_weight
       @initial_costs[key] = initial_accu / total_weight
-    }
+    end
     @last_thresholds_at = Time.now
   end
   def normalize_cost_threshold(cost)
@@ -1361,6 +1377,14 @@ class FilesState
     end
     [ cost, MIN_FRAGMENTATION_THRESHOLD ].max
   end
+  def cleanup_cost_history
+    oldest = Time.now.to_i - COST_HISTORY_TTL
+    TYPES.each do |key|
+      key_history = @cost_achievement_history[key]
+      key_history.shift while key_history.size > COST_HISTORY_SIZE
+      key_history.shift while key_history.any? && key_history.first[3] < oldest
+    end
+  end
   def must_serialize_history?
     @last_history_serialized_at < (Time.now - HISTORY_SERIALIZE_DELAY)
   end
@@ -1369,22 +1393,23 @@ class FilesState
     serialize_entry(@btrfs.dir, @cost_achievement_history, HISTORY_STORE)
     @last_history_serialized_at = Time.now
   end
-  def load_history
-    # This is the result of experimentations with Ceph OSDs
-    default_value = {
-      compressed: [ [ 2.65, 2.65, 1_000_000 ] ] * (COST_HISTORY_SIZE / 100),
-      uncompressed: [ [ 1.02, 1.02, 1_000_000 ] ] * (COST_HISTORY_SIZE / 100),
-    }
+  def load_cost_history
+    default_value = { compressed: [], uncompressed: [] }
+    @cost_achievement_history = unserialize_entry(@btrfs.dir, HISTORY_STORE,
+                                                  "cost history", default_value)
 
-    @cost_achievement_history =
-      unserialize_entry(@btrfs.dir, HISTORY_STORE, "cost history", default_value)
-
-    # Update previous versions without sizes
+    # Update previous versions without timestamps
+    step = COST_HISTORY_TTL / COST_HISTORY_SIZE
+    now = Time.now.to_i
     TYPES.each do |key|
+      history_key = @cost_achievement_history[key]
+      index = history_key.size + 1
       @cost_achievement_history[key].map! do |cost|
-        cost.size == 3 ? cost : cost << 1_000_000
+        index -= 1
+        cost.size == 4 ? cost : cost << (now - step * index)
       end
     end
+    cleanup_cost_history
 
     @last_history_serialized_at = Time.now
     # Force thresholds computation
@@ -1442,14 +1467,6 @@ class FilesState
   def queue_size(type)
     @file_fragmentations[type].size
   end
-  def current_queue_threshold(type)
-    size = queue_size(type)
-    if size > 0
-      @file_fragmentations[type][0].fragmentation_cost
-    else
-      @cost_thresholds[type]
-    end
-  end
   def queue_reserve(type)
     [ (MAX_QUEUE_LENGTH * type_share(type)).to_i, 2 ].max
   end
@@ -1457,6 +1474,7 @@ class FilesState
     TYPES.map{ |t| queue_size(t) }.inject(&:+)
   end
   def threshold_cost(frag)
+    compute_thresholds
     if frag.majority_compressed?
       @cost_thresholds[:compressed]
     else
@@ -2205,7 +2223,7 @@ class BtrfsDev
     # This handles large slowdowns and suspends without spamming the log
     @slow_status_at += SLOW_STATUS_PERIOD until @slow_status_at > now
     msg = ("$ %s %d/%ds: %d queued / %d found, " \
-           "%d recent defrag (fuzzy), %d tracked, %.1f/hour defrag") %
+           "%d recent defrag (fuzzy), %d tracked, %.1f defrag/h") %
           [ @dirname, @rate_controller.scan_time.to_i, SLOW_SCAN_PERIOD,
             @queued, @considered, already_processed, recent,
             3600 * @files_state.defragmentation_rate ]
