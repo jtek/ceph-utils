@@ -1834,6 +1834,7 @@ class BtrfsDev
 
     def initialize(dev:)
       @pass = :none
+      @caught_up = false
       @dev = dev
       load_filecount
       # Need to define default values until init_new_scan (some other threads
@@ -1899,9 +1900,10 @@ class BtrfsDev
       return true if considered < @processed
 
       # Avoid an abnormaly slow first batch just after catching up
-      if considered == @processed
+      if !@caught_up && (considered == @processed)
         info "= #{@dev.dirname}: caught up #{@processed} files"
         @last_slow_scan_batch_start = Time.now
+        @caught_up = true
       end
       false
     end
