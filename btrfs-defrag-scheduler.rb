@@ -883,12 +883,17 @@ class FilesState
           (MAX_ENTRIES / ENTRIES_PER_BYTE)
         @last_tick = Time.now
         @size = 0
+        init_vars
         return
       end
       @bitarray = serialized_data["bitarray"]
       @last_tick = serialized_data["last_tick"]
       @size = serialized_data["size"]
       @bitarray.force_encoding(Encoding::ASCII_8BIT)
+      init_vars
+    end
+
+    def init_vars
       @tick_events = 0
       # Track approximate events per segment
       @average_tick_events = 0.0
