@@ -1021,7 +1021,7 @@ class FilesState
   def next_defrag_duration
     @fragmentation_info_mutex.synchronize {
       last_filefrag = @file_fragmentations[next_available_type].last
-      last_filefrag ? last_filefrag.defrag_time : 0
+      last_filefrag ? last_filefrag.defrag_time : nil
     }
   end
 
@@ -2173,31 +2173,17 @@ class BtrfsDev
     slow_status(already_processed, recent)
   end
 
-  # Don't loop on defrag aggressively if there isn't much to be done
-  # def delay_between_defrags
-  #   # At QUEUE_PROPORTION_EQUILIBRIUM we reach the max speed for defrags
-  #   proportional_delay =
-  #     @files_state.queue_fill_proportion / QUEUE_PROPORTION_EQUILIBRIUM *
-  #     (MAX_DELAY_BETWEEN_DEFRAGS - MIN_DELAY_BETWEEN_DEFRAGS)
-  #   bounded_delay = [ MAX_DELAY_BETWEEN_DEFRAGS - proportional_delay,
-  #                     MIN_DELAY_BETWEEN_DEFRAGS ].max
-  #   slowdown = LoadCheck.instance.slowdown_ratio
-  #   return bounded_delay if slowdown == 1
-  #   adjusted_delay = bounded_delay * slowdown
-  #   # Don't log small slowdowns
-  #   if (adjusted_delay - bounded_delay) > 0.1
-  #     info "~ Increasing defrag delay (%.2fs → %.2fs) due to high load: %d%%" %
-  #          [ bounded_delay, adjusted_delay, (slowdown * 100) ]
-  #   end
-  #   adjusted_delay
-  # end
-
-  def delay_until_available_for_defrag#(min_delay)
-    @checker.delay_until_available(expected_time:
-                                     @files_state.next_defrag_duration,
-                                   use_limit_factor:
-                                     low_queue_defrag_speed_factor)
-                                   # min_delay: min_delay)
+  def delay_until_available_for_defrag
+    next_defrag_duration = @files_state.next_defrag_duration
+    if next_defrag_duration
+      @checker.delay_until_available(expected_time: next_defrag_duration,
+                                     use_limit_factor:
+                                       low_queue_defrag_speed_factor)
+    else
+      # avoid busy loop, this is the maximum wait delay_until_available
+      # could return
+      sleep DEVICE_LOAD_WINDOW
+    end
   end
 
   # When the queue is low we slow down defrags
