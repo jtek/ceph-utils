@@ -146,6 +146,8 @@ MIN_FRAGMENTATION_THRESHOLD = 1.05
 # Note: asking for defragmenting files that won't be may not generate disk load
 # at least no disk writes (and reads have high cache hits probabilities)
 COST_THRESHOLD_PERCENTILE = 25
+# Defragmentation rate that must have happened recently to trust the threshold
+COST_THRESHOLD_TRUST_LEVEL = 10.0 / 3600 # 10 per hour
 COST_COMPUTE_DELAY = 60
 HISTORY_SERIALIZE_DELAY = 3600
 RECENT_SERIALIZE_DELAY = 120
@@ -1331,9 +1333,8 @@ class FilesState
         final_accu += cost_achievement[1] * weight
         total_weight += weight
       end
-      # Percentile reached
-      @cost_thresholds[key] =
-        [ cost_achievement[1], MIN_FRAGMENTATION_THRESHOLD ].max
+      # Percentile reached, normalize it
+      @cost_thresholds[key] = normalize_cost_threshold(cost_achievement[1])
       # Continue with the rest to compute other stats
       while ordered_history.any?
         cost_achievement, weight = ordered_history.shift
@@ -1345,6 +1346,20 @@ class FilesState
       @initial_costs[key] = initial_accu / total_weight
     }
     @last_thresholds_at = Time.now
+  end
+  def normalize_cost_threshold(cost)
+    # The threshold can be raised so high by a succession of difficult files
+    # that it would stop any defragmentation from happening and block the
+    # threshold itself
+    # Adapting based on the defragmentation rate safeguards against this
+    if defragmentation_rate < COST_THRESHOLD_TRUST_LEVEL
+      cost =
+        ((cost * defragmentation_rate) +
+         (MIN_FRAGMENTATION_THRESHOLD *
+          (COST_THRESHOLD_TRUST_LEVEL - defragmentation_rate))) /
+        COST_THRESHOLD_TRUST_LEVEL
+    end
+    [ cost, MIN_FRAGMENTATION_THRESHOLD ].max
   end
   def must_serialize_history?
     @last_history_serialized_at < (Time.now - HISTORY_SERIALIZE_DELAY)
@@ -2190,9 +2205,10 @@ class BtrfsDev
     # This handles large slowdowns and suspends without spamming the log
     @slow_status_at += SLOW_STATUS_PERIOD until @slow_status_at > now
     msg = ("$ %s %d/%ds: %d queued / %d found, " \
-           "%d recent defrag (fuzzy), %d tracked") %
+           "%d recent defrag (fuzzy), %d tracked, %.1f/hour defrag") %
           [ @dirname, @rate_controller.scan_time.to_i, SLOW_SCAN_PERIOD,
-            @queued, @considered, already_processed, recent ]
+            @queued, @considered, already_processed, recent,
+            3600 * @files_state.defragmentation_rate ]
     if @files_state.last_queue_overflow_at &&
        (@files_state.last_queue_overflow_at > (now - SLOW_SCAN_PERIOD))
       msg +=
