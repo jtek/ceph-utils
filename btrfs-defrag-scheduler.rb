@@ -1182,8 +1182,8 @@ class FilesState
     if display_compressed
       info(("# #{@btrfs.dirname} c: %.1f%%; " \
             "Queued (c/u): %d/%d " \
-            "C: %.2f-%.2f,q:%s,t:%.2f " \
-            "U: %.2f-%.2f,q:%s,t:%.2f " \
+            "C: %.2f>%.2f,q:%s,t:%.2f " \
+            "U: %.2f>%.2f,q:%s,t:%.2f " \
             "flw: %d; recent: %d, %s") %
            [ type_share(:compressed) * 100,
              queue_size(:compressed), queue_size(:uncompressed),
@@ -1195,7 +1195,7 @@ class FilesState
              @btrfs.scan_status ])
     else
       info(("# #{@btrfs.dirname} (no_comp); " \
-            "Queued: %d %.2f-%.2f,q:%s,t:%.2f " \
+            "Queued: %d %.2f>%.2f,q:%s,t:%.2f " \
             "flw: %d; recent: %d, %s") %
            [ queue_size(:uncompressed),
              @initial_costs[:uncompressed], @average_costs[:uncompressed],
@@ -1357,6 +1357,7 @@ class FilesState
                                               "recently defragmented"))
     @last_recent_serialized_at = Time.now
   end
+  # Note: must be called protected by @fragmentation_info_mutex
   def serialize_recently_defragmented
     serialize_entry(@btrfs.dir, @recently_defragmented.serialization_data,
                     RECENT_STORE)
@@ -1542,7 +1543,8 @@ class BtrfsDev
              (defrag_time >
               (file_frag.fs_commit_delay + (2 * STAT_QUEUE_INTERVAL)))
             to_remove << file_frag
-            @files_state.historize_cost_achievement(file_frag, value[:start_cost],
+            @files_state.historize_cost_achievement(file_frag,
+                                                    value[:start_cost],
                                                     value[:last_cost],
                                                     value[:size])
           elsif defrag_time > file_frag.fs_commit_delay
