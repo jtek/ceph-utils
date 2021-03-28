@@ -164,12 +164,13 @@ QUEUE_PROPORTION_EQUILIBRIUM = 0.05
 # - the defrag queue is near empty (to avoid fast successions of defrag when
 #   possible)
 DEVICE_USE_LIMITS = {
-  0.2 => 0.75 * $speed_multiplier,
-  0.5 => 0.6 * $speed_multiplier,
-  3 => 0.5 * $speed_multiplier,
-  11 => 0.45 * $speed_multiplier,
-  30 => 0.4 * $speed_multiplier
+  0.2  => 0.75 * $speed_multiplier,
+  0.5  => 0.6 * $speed_multiplier,
+  3.0  => 0.5 * $speed_multiplier,
+  11.0 => 0.45 * $speed_multiplier,
+  30.0 => 0.4 * $speed_multiplier
 }
+DEVICE_LOAD_WINDOW = DEVICE_USE_LIMITS.keys.max
 EXPECTED_COMPRESS_RATIO = 0.5
 
 # How many files do we track for writes, we pass these to the defragmentation
@@ -387,8 +388,6 @@ end
 
 # Limit disk available bandwidth usage
 class UsagePolicyChecker
-  LOAD_WINDOW = DEVICE_USE_LIMITS.keys.max
-
   def initialize(btrfs)
     @btrfs = btrfs
     @device_uses = []
@@ -430,13 +429,13 @@ class UsagePolicyChecker
   def load
     activity = 0.0
     now = Time.now
-    window_start = now - LOAD_WINDOW
+    window_start = now - DEVICE_LOAD_WINDOW
     @device_uses.each do |start, stop|
       next if stop <= window_start
       activity += stop - [ start, window_start ].max
     end
-    load = activity / LOAD_WINDOW
-    if @last_load_check <= (now - (LOAD_WINDOW / 2))
+    load = activity / DEVICE_LOAD_WINDOW
+    if @last_load_check <= (now - (DEVICE_LOAD_WINDOW / 2))
       @average_load = (@average_load + load) / 2
       @last_load_check = now
     end
@@ -466,7 +465,7 @@ class UsagePolicyChecker
     this_start = Time.now
     # Cleanup the device uses
     @device_uses.shift while (first = @device_uses.first) &&
-                             first[1] < (this_start - LOAD_WINDOW)
+                             first[1] < (this_start - DEVICE_LOAD_WINDOW)
   end
 
   def next_available_for(window, expected_time, min_delay, use_limit_factor)
