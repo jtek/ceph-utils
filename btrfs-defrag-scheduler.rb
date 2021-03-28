@@ -886,21 +886,12 @@ class FilesState
           (MAX_ENTRIES / ENTRIES_PER_BYTE)
         @last_tick = Time.now
         @size = 0
-        init_vars
         return
       end
       @bitarray = serialized_data["bitarray"]
       @last_tick = serialized_data["last_tick"]
       @size = serialized_data["size"]
       @bitarray.force_encoding(Encoding::ASCII_8BIT)
-      init_vars
-    end
-
-    def init_vars
-      @tick_events = 0
-      # Track approximate events per segment
-      @average_tick_events = 0.0
-      @last_tick_events_weight = @tick_interval / EVENT_RATE_PERIOD
     end
 
     # Expects a string
@@ -922,7 +913,7 @@ class FilesState
         byte += value
       end
       @bitarray.setbyte(position, byte)
-      register_new_object_event if previous_value == 0
+      @size += 1 if previous_value == 0
     end
 
     def recent?(object_id)
@@ -944,17 +935,7 @@ class FilesState
       }
     end
 
-    def average_object_rate
-      advance_clock_when_needed
-      @average_tick_events / @tick_interval
-    end
-
     private
-
-    def register_new_object_event
-      @size += 1
-      @tick_events += 1
-    end
 
     def advance_clock_when_needed
       tick! while (@last_tick + @tick_interval) < Time.now
@@ -964,10 +945,6 @@ class FilesState
     def tick!
       info "## FuzzyEventTracker size was: #{size}" if $debug
       @last_tick += @tick_interval
-      @average_tick_events =
-        @average_tick_events * (1 - @last_tick_events_weight) +
-        @tick_events * @last_tick_events_weight
-      @tick_events = 0
       return if @size == 0 # nothing to be done
       @size = 0
       @bitarray.size.times do |byte_idx|
