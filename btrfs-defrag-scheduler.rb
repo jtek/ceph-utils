@@ -738,6 +738,8 @@ class FileFragmentation
     "%.4g%s" % [ prefix, suffixes.shift ]
   end
 
+  # Note: we don't use run_with_device_usage here because this is done
+  # shortly after trying to defragment so we should always hit the cache
   def update_fragmentation
     unless File.file?(filename)
       @fragmentation_cost = 1
@@ -1220,7 +1222,7 @@ class FilesState
              @written_files.size, @recently_defragmented.size,
              @btrfs.scan_status ])
     else
-      info(("# #{@btrfs.dirname} (no_comp); " \
+      info(("# #{@btrfs.dirname} (0cmpr); " \
             "Queued: %d %.2f>%.2f,q:%s,t:%.2f " \
             "flw: %d; recent: %d, %s") %
            [ queue_size(:uncompressed),
@@ -1827,6 +1829,7 @@ class BtrfsDev
     end
 
     def init_new_scan
+      # @pass logic probably overkill
       case @pass
       when :none
         @pass = :first
@@ -1947,8 +1950,8 @@ class BtrfsDev
 
     def load_filecount
       default_value = { processed: 0, total: nil }
-      entry =
-        unserialize_entry(@dev.dir, FILE_COUNT_STORE, "filecount", default_value)
+      entry = unserialize_entry(@dev.dir, FILE_COUNT_STORE, "filecount",
+                                default_value)
       @processed = entry[:processed]
       @filecount = entry[:total]
     end
