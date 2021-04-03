@@ -1613,9 +1613,9 @@ class BtrfsDev
   end
 
   def position_on_fs(filename)
-    return filename if filename.index(@dir_slash) == 0
+    return filename if filename.start_with?(@dir_slash)
 
-    subvol_fs = @fs_map.keys.find { |fs| filename.index(fs) == 0 }
+    subvol_fs = @fs_map.keys.find { |fs| filename.start_with?(fs) }
     return nil unless subvol_fs
 
     # This is a local file, triggered from another subdir, move in our domain
@@ -2259,7 +2259,7 @@ class BtrfsDev
   end
 
   def blacklisted?(filename)
-    @no_defrag_list.any? { |blacklist| filename.index(blacklist) == 0 }
+    @no_defrag_list.any? { |blacklist| filename.start_with?(blacklist) }
   end
 
   def rw_subvol?(dir)
@@ -2408,7 +2408,7 @@ def fatrace_file_writes(devs)
         begin
           while line = io.gets do
             # Skip btrfs commands (defrag mostly)
-            next if line.index("btrfs(") == 0
+            next if line.start_with?("btrfs(")
             if match = line.match(extract_write_re)
               file = match[1]
               devs.handle_file_write(file)
