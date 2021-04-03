@@ -148,7 +148,8 @@ MIN_FRAGMENTATION_THRESHOLD = 1.05
 # at least no disk writes (and reads have high cache hits probabilities)
 COST_THRESHOLD_PERCENTILE = 25
 # Defragmentation rate that must have happened recently to trust the threshold
-COST_THRESHOLD_TRUST_LEVEL = 10.0 / 3600 # 10 per hour
+COST_THRESHOLD_TRUST_LEVEL = 20.0 / 3600 # 20 per hour
+COST_THRESHOLD_TRUST_PERIOD = 1800       # 30 minutes
 COST_COMPUTE_DELAY = 60
 HISTORY_SERIALIZE_DELAY = 3600
 RECENT_SERIALIZE_DELAY = 120
@@ -1049,16 +1050,21 @@ class FilesState
     end
   end
 
-  def defragmentation_rate
+  def defragmentation_rate(period: COST_HISTORY_TTL)
     cleanup_cost_history
     rate = 0
     now = Time.now.to_i
+    start = now - period
     TYPES.each do |key|
       key_history = @cost_achievement_history[key]
+      if period < COST_HISTORY_TTL
+        key_history = key_history.select { |a| a[3] >= start }
+      end
+      # We might not cover the whole period if we have COST_HISTORY_SIZE
       rate += if key_history.size == COST_HISTORY_SIZE
                 COST_HISTORY_SIZE.to_f / [ (now - key_history.first[3]), 1 ].max
               else
-                key_history.size.to_f / COST_HISTORY_TTL
+                key_history.size.to_f / period
               end
     end
     rate
@@ -1345,11 +1351,11 @@ class FilesState
     # that it would stop any defragmentation from happening and block the
     # threshold itself
     # Adapting based on the defragmentation rate safeguards against this
-    if defragmentation_rate < COST_THRESHOLD_TRUST_LEVEL
+    rate = defragmentation_rate(period: COST_THRESHOLD_TRUST_PERIOD)
+    if rate < COST_THRESHOLD_TRUST_LEVEL
       cost =
-        ((cost * defragmentation_rate) +
-         (MIN_FRAGMENTATION_THRESHOLD *
-          (COST_THRESHOLD_TRUST_LEVEL - defragmentation_rate))) /
+        ((cost * rate) +
+         (MIN_FRAGMENTATION_THRESHOLD * (COST_THRESHOLD_TRUST_LEVEL - rate))) /
         COST_THRESHOLD_TRUST_LEVEL
     end
     [ cost, MIN_FRAGMENTATION_THRESHOLD ].max
@@ -2201,11 +2207,13 @@ class BtrfsDev
     return if @slow_status_at > now
     # This handles large slowdowns and suspends without spamming the log
     @slow_status_at += SLOW_STATUS_PERIOD until @slow_status_at > now
+    defrag_rate =
+      @files_state.defragmentation_rate(period: COST_THRESHOLD_TRUST_PERIOD)
     msg = ("$ %s %d/%ds: %d queued / %d found, " \
            "%d recent defrag (fuzzy), %d tracked, %.1f defrag/h") %
           [ @dirname, @rate_controller.scan_time.to_i, SLOW_SCAN_PERIOD,
             @queued, @considered, already_processed, recent,
-            3600 * @files_state.defragmentation_rate ]
+            3600 * defrag_rate ]
     if @files_state.last_queue_overflow_at &&
        (@files_state.last_queue_overflow_at > (now - SLOW_SCAN_PERIOD))
       msg +=
