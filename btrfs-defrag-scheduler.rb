@@ -1874,15 +1874,12 @@ class BtrfsDev
     end
 
     def catching_up?(considered:)
-      return false unless @pass == :first
+      return false if @caught_up
       return true if considered < @processed
 
-      # Avoid an abnormaly slow first batch just after catching up
-      if !@caught_up && (considered == @processed)
-        info "= #{@dev.dirname}: caught up #{@processed} files"
-        @last_slow_scan_batch_start = Time.now
-        @caught_up = true
-      end
+      info "= #{@dev.dirname}: caught up #{@processed} files"
+      @last_slow_scan_batch_start = Time.now
+      @caught_up = true
       false
     end
 
