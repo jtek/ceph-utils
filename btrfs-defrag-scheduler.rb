@@ -1250,33 +1250,23 @@ class FilesState
   end
 
   def consolidate_writes
-    batch = []
-    to_check = []
-    args_length = 0
-    args_count = 0
-    @writes_mutex.synchronize {
+    batch = @writes_mutex.synchronize do
+      candidates = []; to_check = []
+      # Detect writen files whose fragmentation should be checked
       @written_files.each do |shortname, value|
         next unless value.ready_for_frag_check?(@btrfs.commit_delay)
-        batch << shortname
+        candidates << shortname
         fullname = @btrfs.full_filename(shortname)
         next unless File.file?(fullname)
         to_check << fullname
-        args_length += fullname.size + 1
-        args_count += 1
-        # We must limit the argument length (the rest will be processed
-        # during a future call)
-        break if args_length >= FILEFRAG_ARG_MAX
       end
-    }
-    # We remove them from @written_files because update_files filters
-    # according to its content
-    @writes_mutex.synchronize do
-      batch.each { |shortname| @written_files.delete(shortname) }
-    end
 
-    # Cleanup written_files if it overflows, moving files to the defragmentation
-    # queue
-    @writes_mutex.synchronize do
+      # Remove them from @written_files because update_files filters
+      # according to its content
+      candidates.each { |shortname| @written_files.delete(shortname) }
+
+      # Cleanup written_files if it overflows, moving files to the
+      # defragmentation queue
       if @written_files.size > MAX_TRACKED_WRITTEN_FILES
         to_remove = @written_files.size - MAX_TRACKED_WRITTEN_FILES
         @written_files.keys.sort_by { |short|
@@ -1286,11 +1276,13 @@ class FilesState
           to_check << fullname if File.file?(fullname)
           @written_files.delete(short)
         }
-        info "** %s writes tracking overflow: %d files moved to defrag" %
+        info "** %s writes tracking overflow: %d files queued for defrag" %
           [ @btrfs.dirname, to_remove ]
       end
+      to_check
     end
-    update_files(FileFragmentation.batch_init(to_check, @btrfs))
+
+    update_files(FileFragmentation.batch_init(batch, @btrfs))
     @last_writes_consolidated_at = Time.now
   end
 
