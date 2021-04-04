@@ -2045,7 +2045,6 @@ class BtrfsDev
         short_name = short_filename(path) rescue ""
         next if short_name == ""
         # Only process file entries (File.file? is true for symlinks)
-        next unless File.exists?(path)
         next if !File.file?(path) || File.symlink?(path)
         @considered += 1
 
@@ -2063,14 +2062,13 @@ class BtrfsDev
           recent += 1; @batch.add_ignored
           next
         end
-        stat = File.stat(path) rescue nil
-        # stat failed: file isn't processable (maybe deleted concurrently)
-        next unless stat
-        # Files small enough to fit a node can't be fragmented
+        # A file small enough to fit a node can't be fragmented
         # We don't count it as if nothing changes it won't become a target
-        (@considered -= 1; next) if stat.size <= 4096
+        (@considered -= 1; next) if File.size(path) <= 4096
 
         @batch.add_path(path)
+      rescue Errno::ENOENT
+        info "- #{@dirname} #{path} removed"
       end
     rescue => ex
       error("Couldn't process #{dir}: " \
