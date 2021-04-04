@@ -1606,6 +1606,8 @@ class BtrfsDev
   end
 
   def claim_file_write(filename)
+    # local_name: name in the main tree
+    # (fatrace could detect them in other mountpoints)
     local_name = position_on_fs(filename)
     return false unless local_name
     @files_state.file_written_to(local_name) unless skip_defrag?(local_name)
@@ -2084,13 +2086,9 @@ class BtrfsDev
     @rate_controller.wait_slow_scan_restart
   end
 
+  # Prune read-only subvolumes or blacklisted paths
   def prune?(entry)
-    (File.directory?(entry) && (entry != dir) &&
-     Pathname.new(entry).mountpoint? && !rw_subvol?(entry)) ||
-      blacklisted?(entry)
-  rescue
-    # Pathname#mountpoint can't process some entries
-    false
+    ro_subvol?(entry) || blacklisted?(entry)
   end
 
   def skip_defrag?(filename)
@@ -2254,31 +2252,28 @@ class BtrfsDev
     @no_defrag_list.any? { |blacklist| filename.start_with?(blacklist) }
   end
 
-  def rw_subvol?(dir)
-    @rw_subvols.include?(dir)
+  def ro_subvol?(dir)
+    @ro_subvols.include?(dir)
   end
 
+  # This updates the subvolume list and tracks their mountpoints and
+  # system device ids (for #known?)
   def update_subvol_dirs(dev_fs_map)
-    subvol_dirs_list = BtrfsDev.list_rw_subvolumes(dir)
+    subvol_dirs_list = BtrfsDev.subvolumes_by_writable(dir)
+    @rw_subvols =
+      subvol_dirs_list[true].map { |subvol| "#{dir}/#{subvol}" }.to_set
+    @ro_subvols =
+      subvol_dirs_list[false].map { |subvol| "#{dir}/#{subvol}" }.to_set
+
     fs_map = {}
     dev_list = Set.new
-    rw_subvols = Set.new
-    # Note dev_fs_map may not have '/' terminated paths but we must use them
+    # We may not have '/' terminated paths everywhere but we must use them
     # for fast and accurate subpath detection/substitution in "position_on_fs"
-    subvol_dirs_list.each do |subvol|
-      full_path = if subvol.end_with?("/")
-                    "#{dir}/#{subvol}"
-                  else
-                    "#{dir}/#{subvol}/"
-                  end
-      # We need the original name for prune? to work
-      rw_subvols << "#{dir}/#{subvol}"
+    @rw_subvols.each do |subvol|
+      full_path = normalize_path_slash("#{dir}/#{subvol}")
       dev_id = File.stat(full_path).dev
       other_fs = dev_fs_map[dev_id]
-      other_fs.each do |fs|
-        fs = "#{fs}/" unless fs.end_with?("/")
-        fs_map[fs] = full_path
-      end
+      other_fs.each { |fs| fs_map[normalize_path_slash(fs)] = full_path }
       dev_list << dev_id
     end
     dev_list << File.stat(dir).dev
@@ -2288,7 +2283,12 @@ class BtrfsDev
       @fs_map = fs_map
     end
     @dev_list = dev_list
-    @rw_subvols = rw_subvols
+  end
+
+  def normalize_path_slash(dir)
+    return dir if dir.end_with?("/")
+
+    "#{dir}/"
   end
 
   class << self
@@ -2307,10 +2307,8 @@ class BtrfsDev
       new_subdirs
     end
 
-    def list_rw_subvolumes(dir)
-      list_subvolumes(dir).select do |subdir|
-        File.writable?("#{dir}/#{subdir}")
-      end
+    def subvolumes_by_writable(dir)
+      list_subvolumes(dir).group_by { |sub| File.writable?("#{dir}/#{subdir}") }
     end
   end
 end
