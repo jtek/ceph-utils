@@ -787,21 +787,21 @@ class FileFragmentation
     def batch_step(files, btrfs)
       sleep btrfs.delay_until_available_for_filefrag
       frags = []
+      start = Time.now
       btrfs.run_with_device_usage do
-        start = Time.now
         IO.popen([ "filefrag", "-v" ] + files,
                  external_encoding: "BINARY") do |io|
           parser = FilefragParser.new
           while line = io.gets do
             parser.add_line(line.chomp!)
-            if parser.eof?
-              frags << parser.file_fragmentation(btrfs)
-              parser.reinit
-            end
+            next unless parser.eof?
+
+            frags << parser.file_fragmentation(btrfs)
+            parser.reinit
           end
         end
-        btrfs.register_filefrag_speed(files.size, Time.now - start)
       end
+      btrfs.register_filefrag_speed(files.size, Time.now - start)
       frags
     end
   end
@@ -1631,18 +1631,16 @@ class BtrfsDev
     shortname = file_frag.short_filename
     # We declare it defragmented ASAP to avoid a double queue
     @files_state.defragmented!(shortname)
-    run_with_device_usage do
-      if $verbose
-        # Deal with file deletion race condition
-        mtime = File.mtime(file_frag.filename) rescue nil
-        msg = " - %s: %s %s,%s,%.2f,%s" %
-              [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
-                file_frag.human_size, file_frag.fragmentation_cost,
-                human_delay_since(mtime) ]
-        info(msg)
-      end
-      system(*defrag_cmd, file_frag.filename)
+    if $verbose
+      # Deal with file deletion race condition
+      mtime = File.mtime(file_frag.filename) rescue nil
+      msg = " - %s: %s %s,%s,%.2f,%s" %
+            [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
+              file_frag.human_size, file_frag.fragmentation_cost,
+              human_delay_since(mtime) ]
+      info(msg)
     end
+    run_with_device_usage { system(*defrag_cmd, file_frag.filename) }
     # Clear up any write detected concurrently
     @files_state.remove_tracking(shortname)
     stat_queue(file_frag)
@@ -1653,17 +1651,13 @@ class BtrfsDev
   # structures: extent and subvolume trees. Can destroy performance on HDD
   def defragment_extent_and_subvolume_trees
     # Defragment root subvolume
-    run_with_device_usage do
-      info " - #{dir}: root subvolume extent and subvolume trees" if $verbose
-      system(*defrag_cmd, dir)
-      info " - #{dir}: root subvolume trees done" if $verbose
-    end
+    info " - #{dir}: root subvolume extent and subvolume trees" if $verbose
+    run_with_device_usage { system(*defrag_cmd, dir) }
+    info " - #{dir}: root subvolume trees done" if $verbose
     @rw_subvols.each do |subvol|
-      run_with_device_usage do
-        info " - #{dir}: #{subvol} extent and subvolume trees" if $verbose
-        system(*defrag_cmd, subvol)
-        info " - #{dir}: #{subvol} trees done" if $verbose
-      end
+      info " - #{dir}: #{subvol} extent and subvolume trees" if $verbose
+      run_with_device_usage { system(*defrag_cmd, subvol) }
+      info " - #{dir}: #{subvol} trees done" if $verbose
     end
   end
 
