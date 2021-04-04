@@ -2340,9 +2340,10 @@ class BtrfsDevs
       # Detect remount -o compress=... events and (no)autodefrag
       @btrfs_devs.each { |dev| dev.detect_options(dev_fs_map) }
       dirs.map(&:first).each do |dir|
-        next unless top_volume?(dir)
         next if known?(dir)
         next if @btrfs_devs.map(&:dir).include?(dir)
+        # More costly, tested last
+        next unless top_volume?(dir)
         @btrfs_devs << BtrfsDev.new(dir, dev_fs_map)
         @new_fs = true
       end
