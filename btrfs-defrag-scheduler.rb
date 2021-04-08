@@ -2320,32 +2320,45 @@ class BtrfsDevs
     @new_fs = false
   end
 
-  def update!
-    # Enumerate BTRFS filesystems, avoid autodefrag ones
+  def update!(detect_new_fs: true)
+    # Enumerate BTRFS filesystems, build :
+    # - a dir -> option_string map
     dirs = File.open("/proc/mounts", "r") do |f|
       f.readlines.map { |line| line.split(' ') }
         .select { |ary| ary[2] == 'btrfs' }
     end.map { |ary| [ ary[1], ary[3] ] }
+    # - a deviceid -> [ dir1, dir2, ...] map
     dev_fs_map = Hash.new { |hash, key| hash[key] = Set.new }
-    dirs.each { |dir, options| dev_fs_map[File.stat(dir).dev] << dir }
-    @lock.synchronize do
-      umounted =
-        @btrfs_devs.select { |dev| !dirs.map(&:first).include?(dev.dir) }
-      umounted.each do |dev|
-        info "= #{dev.dir} not mounted, disabling"
-        dev.stop_processing
-      end
-      @btrfs_devs.reject! { |dev| umounted.include?(dev) }
+    dirs.each { |dir, _options| dev_fs_map[File.stat(dir).dev] << dir }
 
-      # Detect remount -o compress=... events and (no)autodefrag
-      @btrfs_devs.each { |dev| dev.detect_options(dev_fs_map) }
-      dirs.map(&:first).each do |dir|
-        next if known?(dir)
-        next if @btrfs_devs.map(&:dir).include?(dir)
-        # More costly, tested last
-        next unless top_volume?(dir)
-        @btrfs_devs << BtrfsDev.new(dir, dev_fs_map)
-        @new_fs = true
+    umounted =
+      @btrfs_devs.select { |dev| !dirs.map(&:first).include?(dev.dir) }
+    umounted.each do |dev|
+      info "= #{dev.dir} not mounted, disabling"
+      dev.stop_processing
+    end
+    # @btrfs_devs.reject! { |dev| umounted.include?(dev) }
+    still_mounted =
+      @btrfs_devs.select { |dev| dirs.map(&:first).include?(dev.dir) }
+
+    # Detect remount -o compress=... events and (no)autodefrag
+    still_mounted.each { |dev| dev.detect_options(dev_fs_map) }
+    newly_mounted = []
+    dirs.map(&:first).each do |dir|
+      next if known?(dir)
+      next if still_mounted.map(&:dir).include?(dir)
+      # More costly, tested last
+      next unless top_volume?(dir)
+      newly_mounted << BtrfsDev.new(dir, dev_fs_map)
+      @new_fs = true if detect_new_fs
+    end
+    new_devs = still_mounted + newly_mounted
+    # Longer devs first to avoid a top dir matching a file
+    # in a device mounted below when using handle_file_write_old
+    # new_devs.sort_by! { |dev| -dev.dir.size }
+    @btrfs_devs = new_devs
+  end
+
       end
       # Longer devs first to avoid a top dir matching a file
       # in a device mounted below
@@ -2357,13 +2370,18 @@ class BtrfsDevs
     @lock.synchronize { @btrfs_devs.find { |dev| dev.claim_file_write(file) } }
   end
 
+  # We keep the old code as it is faster for low dev numbers
+  # we might want to switch dynamically in future versions
+  def handle_file_write_old(file)
+    @btrfs_devs.find { |dev| dev.claim_file_write(file) }
+  end
+
   # To call to detect a new fs being added to the watch list
-  def new_fs?
-    copy = false
-    @lock.synchronize do
-      copy = @new_fs
-      @new_fs = false
-    end
+  def recent_new_fs?
+    # Using a copy and only resetting on true makes this thread-safe
+    # we can't ignore a new filesystem
+    copy = @new_fs
+    @new_fs = false if copy
     copy
   end
 
@@ -2377,17 +2395,13 @@ class BtrfsDevs
     dev_id = File.stat(dir).dev
     @btrfs_devs.any? { |btrfs_dev| btrfs_dev.has_dev?(dev_id) }
   rescue
-    true # if File.stat failed, this is a race condition with a concurrent umount
+    true # if File.stat failed, this is a race condition with concurrent umount
   end
 end
 
 include Outputs
 
 def fatrace_file_writes(devs)
-  # This is a hack to avoid early restarts:
-  # new_fs? waits for devs.update! to finish which can be a bit long
-  # as it calls the btrfs command multiple times to parse dev properties
-  sleep 0.5; devs.new_fs?
   cmd = [ "fatrace", "-f", "W" ]
   extract_write_re = /^[^(]+\([0-9]+\): [ORWC]+ (.*)$/
   loop do
@@ -2406,9 +2420,9 @@ def fatrace_file_writes(devs)
             else
               error "Can't extract file from '#{line}'"
             end
-            # TODO: Maybe don't check on each pass
+            # TODO: Maybe don't check on each pass (benchmark this)
             break if Time.now > (last_popen_at + FATRACE_TTL)
-            break if devs.new_fs?
+            break if devs.recent_new_fs?
           end
         rescue => ex
           msg = "#{ex}\n#{ex.backtrace.join("\n")}"
@@ -2432,7 +2446,10 @@ info "**********************************************"
 info "** Starting BTRFS defragmentation scheduler **"
 info "**********************************************"
 devs = BtrfsDevs.new
-devs.update!
-Thread.new { fatrace_file_writes(devs) }
+Thread.new do
+  # don't launch fatrace until devs are all accounted for
+  devs.update!(detect_new_fs: false)
+  fatrace_file_writes(devs)
+end
 
 loop { sleep FS_DETECT_PERIOD; devs.update! }
