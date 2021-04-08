@@ -1614,6 +1614,10 @@ class BtrfsDev
     true
   end
 
+  def handle_file_write(filename)
+    @files_state.file_written_to(filename) unless skip_defrag?(filename)
+  end
+
   def position_on_fs(filename)
     return filename if filename.start_with?(@dir_slash)
 
@@ -1622,6 +1626,10 @@ class BtrfsDev
 
     # This is a local file, triggered from another subdir, move in our domain
     filename.gsub(subvol_fs, @fs_map[subvol_fs])
+  end
+
+  def each_fs_map
+    @fs_map.each_pair { |path, subvol| yield(path, subvol) }
   end
 
   def defrag!
@@ -2316,8 +2324,9 @@ end
 class BtrfsDevs
   def initialize
     @btrfs_devs = []
-    @lock = Mutex.new
     @new_fs = false
+    # Used to find which dev handles which tree
+    @dev_tree = {}
   end
 
   def update!(detect_new_fs: true)
@@ -2357,17 +2366,50 @@ class BtrfsDevs
     # in a device mounted below when using handle_file_write_old
     # new_devs.sort_by! { |dev| -dev.dir.size }
     @btrfs_devs = new_devs
+    rebuild_dev_tree
   end
 
+  def rebuild_dev_tree
+    tree = {}
+    @btrfs_devs.each do |btrfs|
+      # Add our root
+      add_path_to_tree(tree: tree, path: btrfs.dir, dev: btrfs)
+      # Add mappings from other mounts
+      btrfs.each_fs_map do |path, subvol|
+        add_path_to_tree(tree: tree, path: path, dev: btrfs, map: subvol)
       end
-      # Longer devs first to avoid a top dir matching a file
-      # in a device mounted below
-      @btrfs_devs.sort_by! { |dev| -dev.dir.size }
     end
+    @dev_tree = tree
   end
 
   def handle_file_write(file)
-    @lock.synchronize { @btrfs_devs.find { |dev| dev.claim_file_write(file) } }
+    # Descend the tree until we reach the bottom
+    # note that we don't access @dev_tree but its value, so @dev_tree can
+    # be reaffected concurrently (no need for lock), but not modified in place
+    current_tree = @dev_tree
+    # / could be a btrfs filesystem and stored here
+    dev = current_tree[:dev]
+    path = current_tree[:path]
+    map = current_tree[:map]
+    list = file.split('/')
+    # We already have information for '/', skip
+    list.shift
+    list.each do |dir|
+      current_tree = current_tree[dir]
+      # No subtree: our current values are the ones we are looking for, stop
+      break unless current_tree
+
+      current_path = current_tree[:path]
+      # No current_path: this is an empty node, skip
+      next unless current_path
+      path = current_path
+      dev = current_tree[:dev]
+      map = current_tree[:map]
+    end
+
+    return unless dev
+    # Rewrite the file location if we have a map
+    dev.handle_file_write(map ? file.gsub(path, map) : file)
   end
 
   # We keep the old code as it is faster for low dev numbers
@@ -2396,6 +2438,19 @@ class BtrfsDevs
     @btrfs_devs.any? { |btrfs_dev| btrfs_dev.has_dev?(dev_id) }
   rescue
     true # if File.stat failed, this is a race condition with concurrent umount
+  end
+
+  private
+
+  def add_path_to_tree(tree:, path:, dev:, map: nil)
+    current_subtree = tree
+    Pathname.new(path).each_filename do |dir|
+      current_subtree[dir] ||= {}
+      current_subtree = current_subtree[dir]
+    end
+    current_subtree[:dev] = dev
+    current_subtree[:path] = path
+    current_subtree[:map] = map if map
   end
 end
 
