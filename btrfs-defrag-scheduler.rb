@@ -2261,16 +2261,16 @@ class BtrfsDev
   def update_subvol_dirs(dev_fs_map)
     subvol_dirs_list = BtrfsDev.subvolumes_by_writable(dir)
     @rw_subvols =
-      subvol_dirs_list[true].map { |subvol| "#{dir}/#{subvol}" }.to_set
+      (subvol_dirs_list[true]||[]).map { |subvol| "#{dir}/#{subvol}" }.to_set
     @ro_subvols =
-      subvol_dirs_list[false].map { |subvol| "#{dir}/#{subvol}" }.to_set
+      (subvol_dirs_list[false]||[]).map { |subvol| "#{dir}/#{subvol}" }.to_set
 
     fs_map = {}
     dev_list = Set.new
     # We may not have '/' terminated paths everywhere but we must use them
     # for fast and accurate subpath detection/substitution in "position_on_fs"
     @rw_subvols.each do |subvol|
-      full_path = normalize_path_slash("#{dir}/#{subvol}")
+      full_path = normalize_path_slash(subvol)
       dev_id = File.stat(full_path).dev
       other_fs = dev_fs_map[dev_id]
       other_fs.each { |fs| fs_map[normalize_path_slash(fs)] = full_path }
@@ -2308,7 +2308,7 @@ class BtrfsDev
     end
 
     def subvolumes_by_writable(dir)
-      list_subvolumes(dir).group_by { |sub| File.writable?("#{dir}/#{subdir}") }
+      list_subvolumes(dir).group_by { |sub| File.writable?("#{dir}/#{sub}") }
     end
   end
 end
