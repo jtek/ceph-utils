@@ -1092,21 +1092,21 @@ class FilesState
   end
 
   # This adds or updates work to do based on fragmentations
+  # returns the number of new files put in queue
   def update_files(file_fragmentations)
     return 0 unless file_fragmentations.any?
 
-    updated_names = file_fragmentations.map(&:short_filename)
+    # Use a set for faster include?
+    updated_names = file_fragmentations.map(&:short_filename).to_set
     # Remove files we won't consider anyway
     file_fragmentations.reject! { |frag| below_threshold_cost(frag) }
+    duplicates = 0
     @fragmentation_info_mutex.synchronize do
-      # Remove duplicates
-      # they will be replaced in queue later if still above threshold)
-      duplicate_names = []
+      # Remove duplicates (will be put in queue again if still above threshold)
       TYPES.each do |type|
         @file_fragmentations[type].reject! do |frag|
-          short_name = frag.short_filename
-          if updated_names.include?(short_name)
-            duplicate_names << short_name
+          if updated_names.include?(frag.short_filename)
+            duplicates += 1
             true
           end
         end
@@ -1115,18 +1115,13 @@ class FilesState
       file_fragmentations.each do |f|
         @file_fragmentations[f.compress_type] << f
       end
-      # Keep the order to easily fetch the worst fragemented ones
+      # Keep the order to easily fetch the worst fragmented ones
       sort_files
       # Remove old entries and fit in max queue length
       cleanup_files
-      # Return number of queued items, ignoring duplicates
-      (updated_names - duplicate_names).select do |n|
-        # Note: uses uncompressed first as it seems the most common case
-        TYPES.any? do |type|
-          @file_fragmentations[type].any? { |f| f.short_filename == n }
-        end
-      end.size
     end
+    # Return number of queued items, ignoring duplicates
+    file_fragmentations.size - duplicates
   end
 
   def file_written_to(filename)
