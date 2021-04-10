@@ -1012,7 +1012,7 @@ class FilesState
 
     @written_files = {}
     @writes_mutex = Mutex.new
-    @last_writes_consolidated_at = @next_status_at = Time.now
+    @next_status_at = Time.now
   end
 
   def any_interesting_file?
@@ -1133,16 +1133,12 @@ class FilesState
     status
     shortname = @btrfs.short_filename(filename)
     return if recently_defragmented?(shortname)
-    @writes_mutex.synchronize {
+    @writes_mutex.synchronize do
       if @written_files[shortname]
         @written_files[shortname].write!
       else
         @written_files[shortname] = WriteEvents.new
       end
-    }
-    if @last_writes_consolidated_at <
-        (Time.now - TRACKED_WRITTEN_FILES_CONSOLIDATION_PERIOD)
-      consolidate_writes
     end
   end
 
@@ -1235,20 +1231,6 @@ class FilesState
     @next_status_at += STATUS_PERIOD while now > @next_status_at
   end
 
-  private
-  # MUST be protected by @fragmentation_info_mutex
-  def next_available_type
-    next_type =
-      @fetch_accumulator.keys.find { |type| @fetch_accumulator[type] >= 1.0 }
-    # In case of Float rounding errors we might not have any available next_type
-    case next_type
-    when :compressed
-      @file_fragmentations[:compressed].any? ? :compressed : :uncompressed
-    else
-      @file_fragmentations[:uncompressed].any? ? :uncompressed : :compressed
-    end
-  end
-
   def consolidate_writes
     batch = @writes_mutex.synchronize do
       candidates = []; to_check = []
@@ -1258,6 +1240,7 @@ class FilesState
         candidates << shortname
         fullname = @btrfs.full_filename(shortname)
         next unless File.file?(fullname)
+        # We don't check deleted files but stop tracking them
         to_check << fullname
       end
 
@@ -1283,7 +1266,20 @@ class FilesState
     end
 
     update_files(FileFragmentation.batch_init(batch, @btrfs))
-    @last_writes_consolidated_at = Time.now
+  end
+
+  private
+  # MUST be protected by @fragmentation_info_mutex
+  def next_available_type
+    next_type =
+      @fetch_accumulator.keys.find { |type| @fetch_accumulator[type] >= 1.0 }
+    # In case of Float rounding errors we might not have any available next_type
+    case next_type
+    when :compressed
+      @file_fragmentations[:compressed].any? ? :compressed : :uncompressed
+    else
+      @file_fragmentations[:uncompressed].any? ? :uncompressed : :compressed
+    end
   end
 
   def thresholds_expired?
@@ -1539,16 +1535,17 @@ class BtrfsDev
       end
     end
     @defrag_thread = Thread.new do
-      loop do
-        defrag!
-        #min_delay = delay_between_defrags
-        sleep delay_until_available_for_defrag#(min_delay)
-      end
+      loop { defrag!; sleep delay_until_available_for_defrag }
+    end
+    @write_consolidator_thread = Thread.new do
+      sleep TRACKED_WRITTEN_FILES_CONSOLIDATION_PERIOD
+      @files_state.consolidate_writes
     end
   end
 
   def stop_processing
-    [ @slow_scan_thread, @stat_thread, @defrag_thread ].each do |thread|
+    [ @slow_scan_thread, @stat_thread, @defrag_thread,
+      @write_consolidator_thread ].each do |thread|
       Thread.kill(thread) if thread
     end
   end
