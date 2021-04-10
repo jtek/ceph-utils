@@ -1643,8 +1643,6 @@ class BtrfsDev
       info(msg)
     end
     run_with_device_usage { system(*defrag_cmd, file_frag.filename) }
-    # Clear up any write detected concurrently
-    @files_state.remove_tracking(shortname)
     stat_queue(file_frag)
   end
 
