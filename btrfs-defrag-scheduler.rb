@@ -2074,11 +2074,15 @@ class BtrfsDev
         end
         # A file small enough to fit a node can't be fragmented
         # We don't count it as if nothing changes it won't become a target
-        (@considered -= 1; next) if File.size(path) <= 4096
-
-        @batch.add_path(path)
-      rescue Errno::ENOENT
-        info "- #{@dirname} #{path} removed"
+        begin
+          if File.size(path) <= 4096
+            @considered -= 1
+          else
+            @batch.add_path(path)
+          end
+        rescue Errno::ENOENT => ex
+          info "- #{@dirname} #{path} removed"
+        end
       end
     rescue => ex
       error("Couldn't process #{dir}: " \
@@ -2369,6 +2373,10 @@ class BtrfsDevs
     rebuild_dev_tree
   end
 
+  # Note: there is a bug with this as it doesn't consider other types of
+  # filesystems that could be mounted below a BTRFS mountpoint
+  # it is probably a rare case and can be solved by adding entries for
+  # these other mountpoints with dev: nil to be ignored by handle_file_write
   def rebuild_dev_tree
     tree = {}
     @btrfs_devs.each do |btrfs|
