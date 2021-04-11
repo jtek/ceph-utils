@@ -192,7 +192,7 @@ DEFAULT_COMMIT_DELAY = 30
 STAT_QUEUE_INTERVAL = 10
 # Fragmentation information isn't available right after the last write or even
 # commit (as in commit_delay of the filesystem)
-FRAGMENTATION_INFO_DELAY_FACTOR = 4
+FRAGMENTATION_INFO_DELAY_FACTOR = 2
 # Some files might be written to constantly, don't delay passing them to
 # filefrag more than that
 MAX_WRITES_DELAY = 4 * 3600
@@ -1039,14 +1039,14 @@ class FilesState
 
   # Implement a weighted round-robin
   def pop_most_interesting
-    @fragmentation_info_mutex.synchronize {
+    @fragmentation_info_mutex.synchronize do
       # Choose type before updating the accumulators to avoid inadvertedly
       # switching to another type after calling next_defrag_duration
       current_type = next_available_type
-      @fetch_accumulator[current_type] %= 1.0
+      @fetch_accumulator[current_type] = @fetch_accumulator[current_type] % 1.0
       TYPES.each { |type| @fetch_accumulator[type] += type_share(type) }
       @file_fragmentations[current_type].pop
-    }
+    end
   end
 
   def recently_defragmented?(shortname)
@@ -1156,33 +1156,31 @@ class FilesState
     frag.fragmentation_cost <= threshold_cost(frag)
   end
 
+  # We are tracking the relative amount of (un)compressed files
+  # to know at which relative rates we should fetch them from the queue
   def type_track(types)
-    @tracker_mutex.synchronize {
-      types.each { |type|
-        @type_tracker[type] += 1.0
-      }
+    @tracker_mutex.synchronize do
+      types.each { |type| @type_tracker[type] += 1.0 }
       total = @type_tracker.values.inject(&:+)
       memory = 10_000.0 # TODO: tune/config
-      if total > memory
-        @type_tracker.each_key { |key|
-          @type_tracker[key] *= (memory / total)
-        }
-      end
-    }
+      break if total <= memory
+
+      @type_tracker.each_key { |key| @type_tracker[key] *= (memory / total) }
+    end
   end
 
   def type_share(type)
-    @tracker_mutex.synchronize {
+    @tracker_mutex.synchronize do
       total = @type_tracker.values.inject(&:+)
       # Return a default value if there isn't enough data, assume equal shares
       (total < 10) ? 0.5 : @type_tracker[type] / total
-    }
+    end
   end
 
   def queue_fill_proportion
-    @fragmentation_info_mutex.synchronize {
+    @fragmentation_info_mutex.synchronize do
       total_queue_size.to_f / MAX_QUEUE_LENGTH
-    }
+    end
   end
 
   def status
@@ -1713,9 +1711,6 @@ class BtrfsDev
   end
   def full_filename(short_filename)
     "#{dir}/#{short_filename}"
-  end
-  def file_id(short_filename)
-    "#{@dirname}: #{short_filename}"
   end
   def average_cost(type)
     @files_state.average_cost(type)
