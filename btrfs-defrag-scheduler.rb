@@ -1730,7 +1730,7 @@ class BtrfsDev
 
   # accelerate/slowdown based on queue length and IO load
   def global_speed_factor
-    queue_speed_factor / @checker.expected_slowdown
+    queue_speed_factor #/ @checker.expected_slowdown
   end
 
   private
