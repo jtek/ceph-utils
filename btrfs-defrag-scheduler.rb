@@ -1499,6 +1499,10 @@ class BtrfsDev
     end
   end
 
+  def active_for_defragmentation?
+    !autodefrag?
+  end
+
   def start_processing
     @stat_thread = Thread.new { handle_perf_queue_progress }
     @slow_scan_thread = Thread.new do
@@ -2353,6 +2357,7 @@ class BtrfsDevs
   def rebuild_dev_tree
     tree = {}
     @btrfs_devs.each do |btrfs|
+      next unless btrfs.active_for_defragmentation?
       # Add our root
       add_path_to_tree(tree: tree, path: btrfs.dir, dev: btrfs)
       # Add mappings from other mounts
