@@ -189,7 +189,9 @@ MIN_WRITTEN_FILES_CONSOLIDATION_PERIOD = 60
 # it's otherwise parsed from /proc/mounts
 DEFAULT_COMMIT_DELAY = 30
 # How often do we check for defragmentation progress
-STAT_QUEUE_INTERVAL = 10
+PERF_QUEUE_INTERVAL = 20
+# Enforce a minimum of 10 seconds between checks (if they take too long)
+MIN_PERF_QUEUE_INTERVAL = 10
 # Fragmentation information isn't available right after the last write or even
 # commit (as in commit_delay of the filesystem)
 FRAGMENTATION_INFO_DELAY_FACTOR = 2
@@ -716,9 +718,7 @@ class FileFragmentation
   end
 
   def defrag_time
-    time = read_time +
-           (write_time *
-            @btrfs.average_cost(compress_type))
+    time = read_time + (write_time * @btrfs.average_cost(compress_type))
     time *= EXPECTED_COMPRESS_RATIO if compress_type == :compressed
     time
   end
@@ -1278,15 +1278,11 @@ class FilesState
     end
   end
 
-  def thresholds_expired?
-    @last_thresholds_at < (Time.now - COST_COMPUTE_DELAY)
-  end
-
   # each achievement is [ initial_cost, final_cost, file_size ]
   # file_size is currently ignored (the target was jumping around on filesystems
   # with very diverse file sizes)
   def compute_thresholds
-    return unless thresholds_expired?
+    return unless @last_thresholds_at < (Time.now - COST_COMPUTE_DELAY)
     cleanup_cost_history
     TYPES.each do |key|
       key_history = @cost_achievement_history[key]
@@ -1332,11 +1328,12 @@ class FilesState
     end
     @last_thresholds_at = Time.now
   end
+
+  # The threshold can be raised so high by a succession of difficult files
+  # that it would stop any defragmentation from happening and block the
+  # threshold itself
+  # Adapting based on the defragmentation rate safeguards against this
   def normalize_cost_threshold(cost)
-    # The threshold can be raised so high by a succession of difficult files
-    # that it would stop any defragmentation from happening and block the
-    # threshold itself
-    # Adapting based on the defragmentation rate safeguards against this
     rate = defragmentation_rate(period: COST_THRESHOLD_TRUST_PERIOD)
     if rate < COST_THRESHOLD_TRUST_LEVEL
       cost =
@@ -1473,7 +1470,7 @@ class BtrfsDev
 
     # Tracking of file defragmentation
     @files_in_defragmentation = {}
-    @stat_mutex = Mutex.new
+    @perf_queue_mutex = Mutex.new
 
     # Init filefrag time tracking and rate with sensible values
     @average_file_time = 0
@@ -1521,7 +1518,7 @@ class BtrfsDev
   end
 
   def start_processing
-    @stat_thread = Thread.new { handle_stat_queue_progress }
+    @stat_thread = Thread.new { handle_perf_queue_progress }
     @slow_scan_thread = Thread.new do
       info("## Beginning files list updater thread for #{dir}")
       slow_files_state_update(first_pass: true)
@@ -1553,10 +1550,10 @@ class BtrfsDev
   end
 
   # Manage queue of asynchronously defragmented files
-  def stat_queue(file_frag)
+  def queue_defragmentation_performance_check(file_frag)
     # Initially queued_at and last_change must be equal
     queued_at = Time.now
-    @stat_mutex.synchronize {
+    @perf_queue_mutex.synchronize do
       @files_in_defragmentation[file_frag] = {
         queued_at: queued_at,
         last_change: queued_at,
@@ -1564,21 +1561,21 @@ class BtrfsDev
         start_cost: file_frag.fragmentation_cost,
         size: file_frag.size
       }
-    }
+    end
   end
 
-  def handle_stat_queue_progress
+  def handle_perf_queue_progress
     loop do
       check_start = Time.now
       to_remove = []
-      @stat_mutex.synchronize do
-        @files_in_defragmentation.each { |file_frag, value|
+      @perf_queue_mutex.synchronize do
+        @files_in_defragmentation.each do |file_frag, value|
           last_change = value[:last_change]
           defrag_time = Time.now - value[:queued_at]
           # Cases where we can stop and register the costs
           if value[:last_cost] == 1.0 ||
              (defrag_time >
-              (file_frag.fs_commit_delay + (2 * STAT_QUEUE_INTERVAL)))
+              (file_frag.fs_commit_delay + (2 * PERF_QUEUE_INTERVAL)))
             to_remove << file_frag
             @files_state.historize_cost_achievement(file_frag,
                                                     value[:start_cost],
@@ -1592,11 +1589,11 @@ class BtrfsDev
               value[:last_change] = Time.now
             end
           end
-        }
+        end
         to_remove.each { |frag| @files_in_defragmentation.delete(frag) }
       end
-      wait = (check_start + STAT_QUEUE_INTERVAL) - Time.now
-      sleep wait if wait > 0
+      wait = (check_start + PERF_QUEUE_INTERVAL) - Time.now
+      sleep [ wait, MIN_PERF_QUEUE_INTERVAL ].max
     end
   end
 
@@ -1646,7 +1643,7 @@ class BtrfsDev
       info(msg)
     end
     run_with_device_usage { system(*defrag_cmd, file_frag.filename) }
-    stat_queue(file_frag)
+    queue_defragmentation_performance_check(file_frag)
   end
 
   # Experimental, the impact of this isn't depicted in the BTRFS documentation
