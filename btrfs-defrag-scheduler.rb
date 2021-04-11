@@ -182,9 +182,9 @@ EXPECTED_COMPRESS_RATIO = 0.5
 MAX_TRACKED_WRITTEN_FILES = 20_000
 # Period over which to distribute defragmentation checks for files which
 # were written at the same time, this avoids filefrag call storms
-DEFRAG_CHECK_DISTRIBUTION_PERIOD = 120
-# How often do we check fragmentation of files written to
-TRACKED_WRITTEN_FILES_CONSOLIDATION_PERIOD = 5
+#DEFRAG_CHECK_DISTRIBUTION_PERIOD = 60
+# How often do we select files written to for fragmentation checks
+MIN_WRITTEN_FILES_CONSOLIDATION_PERIOD = 60
 # Default Btrfs commit delay when none is specified
 # it's otherwise parsed from /proc/mounts
 DEFAULT_COMMIT_DELAY = 30
@@ -815,26 +815,29 @@ class WriteEvents
   def write!
     @last = Time.now
   end
+
+  # Deprecated? : fragmentation checks avalanche should not be a problem
+  # anymore, they are done asynchronously and through run_with_device_usage
   # We suppose a file which is recently modified has higher chances of a
   # near-future modification, so we delay its check for defragmentation
   # commit_delay is used to avoid triggering fragmentation checks too early
   # by experience the fragmentation information is only updated after commits,
   # not after writes
-  def ready_for_frag_check?(commit_delay)
-    now = Time.now
-    # We add a small delay to account for unexpected latencies
-    after_write_delay = commit_delay * FRAGMENTATION_INFO_DELAY_FACTOR
-    (last < (now - after_write_delay - fuzzy_delay)) ||
-      (first < (now - MAX_WRITES_DELAY))
-  end
+  # def ready_for_frag_check?(commit_delay)
+  #   now = Time.now
+  #   # We add a small delay to account for unexpected latencies
+  #   after_write_delay = commit_delay * FRAGMENTATION_INFO_DELAY_FACTOR
+  #   (last < (now - after_write_delay - fuzzy_delay)) ||
+  #     (first < (now - MAX_WRITES_DELAY))
+  # end
 
-  private
+  # private
 
-  # This avoids an avalanche of defragmentation checks, use most noisy
-  # bits of first timestamp
-  def fuzzy_delay
-    first.usec % DEFRAG_CHECK_DISTRIBUTION_PERIOD
-  end
+  # # This avoids an avalanche of fragmentation checks, use most noisy
+  # # bits of first timestamp
+  # def fuzzy_delay
+  #   first.usec % DEFRAG_CHECK_DISTRIBUTION_PERIOD
+  # end
 end
 
 # Maintain the status of all candidates for defragmentation for a given
@@ -1533,8 +1536,10 @@ class BtrfsDev
       loop { defrag!; sleep delay_until_available_for_defrag }
     end
     @write_consolidator_thread = Thread.new do
-      sleep TRACKED_WRITTEN_FILES_CONSOLIDATION_PERIOD
-      @files_state.consolidate_writes
+      loop do
+        sleep MIN_WRITTEN_FILES_CONSOLIDATION_PERIOD
+        @files_state.consolidate_writes
+      end
     end
   end
 
