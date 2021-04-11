@@ -223,9 +223,6 @@ MIN_FILES_BATCH_SIZE = 1
 # We ignore files recently defragmented for 12 hours
 IGNORE_AFTER_DEFRAG_DELAY = 12 * 3600
 
-#MIN_DELAY_BETWEEN_DEFRAGS = 0.05
-# Actually max delay before checking when to defrag next
-#MAX_DELAY_BETWEEN_DEFRAGS = 15
 MIN_QUEUE_DEFRAG_SPEED_FACTOR = 0.2
 
 # How often do we dump a status update
@@ -257,9 +254,9 @@ RECENT_STORE     = "#{STORE_DIR}/recent.yml"
 # Per filesystem defrag blacklist
 DEFRAG_BLACKLIST_FILE = ".no_defrag"
 
+# Synchronize multithreaded outputs
 $output_mutex = Mutex.new
 
-# Synchronize multithreaded outputs
 module Outputs
   def short_tstamp
     Time.now.strftime("%Y%m%d %H%M%S")
@@ -2226,7 +2223,8 @@ class BtrfsDev
     end
   end
 
-  # When the queue is low we slow down defrags
+  # When the queue is low we slow down defrags to avoid spikes in IO activity
+  # which don't help (as there's not much to do)
   def low_queue_defrag_speed_factor
     # At QUEUE_PROPORTION_EQUILIBRIUM we reach the max speed for defrags
     # But don't go below MIN_QUEUE_DEFRAG_SPEED_FACTOR
