@@ -1211,18 +1211,16 @@ class FilesState
 
   def consolidate_writes
     batch = @writes_mutex.synchronize do
-      candidates = []; to_check = []
+      # used for each entry
+      # delay = @btrfs.commit_delay
+      threshold =
+        Time.now - (FRAGMENTATION_INFO_DELAY_FACTOR * @btrfs.commit_delay)
       # Detect writen files whose fragmentation should be checked
-      @written_files.each do |shortname, value|
-        next unless value.ready_for_frag_check?(@btrfs.commit_delay)
-        candidates << shortname
-        fullname = @btrfs.full_filename(shortname)
-        next unless File.file?(fullname)
-        # We don't check deleted files but stop tracking them
-        to_check << fullname
-      end
+      candidates = @written_files.select do |shortname, value|
+        value.last < threshold
+      end.keys
 
-      # Remove them from @written_files because update_files filters
+      # Remove them from @written_files before update_files as it filters
       # according to its content
       candidates.each { |shortname| @written_files.delete(shortname) }
 
@@ -1233,16 +1231,18 @@ class FilesState
         @written_files.keys.sort_by { |short|
           @written_files[short].last
         }[0...to_remove].each { |short|
-          fullname = @btrfs.full_filename(short)
-          to_check << fullname if File.file?(fullname)
+          candidates << short
           @written_files.delete(short)
         }
         info "** %s writes tracking overflow: %d files queued for defrag" %
           [ @btrfs.dirname, to_remove ]
       end
-      to_check
+      candidates
     end
 
+    # Use full filenames and filter deleted files
+    batch.map! { |short| @btrfs.full_filename(short) }
+         .select! { |filename| File.file?(filename)}
     update_files(FileFragmentation.batch_init(batch, @btrfs))
   end
 
