@@ -1721,14 +1721,9 @@ class BtrfsDev
   end
 
   def register_filefrag_speed(count, time)
-    file_time = time / count
-    weight = time / 120
-    @average_file_time = if weight >= 0.5
-                           (@average_file_time + file_time) / 2
-                         else
-                           @average_file_time * (1 - weight) +
-                             file_time * weight
-                         end
+    memory = 2 * MAX_FILES_BATCH_SIZE
+    @average_file_time =
+      (@average_file_time * (memory - count) + time)/memory
     @rate_controller.set_slow_batch_target
   end
 
