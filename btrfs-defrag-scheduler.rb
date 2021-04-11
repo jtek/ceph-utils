@@ -2303,11 +2303,54 @@ class BtrfsDev
 end
 
 class BtrfsDevs
+  include Outputs
+
   def initialize
     @btrfs_devs = []
     @new_fs = false
     # Used to find which dev handles which tree
     @dev_tree = {}
+  end
+
+  def fatrace_file_writes
+    cmd = [ "fatrace", "-f", "W" ]
+    extract_write_re = /^[^(]+\([0-9]+\): [ORWC]+ (.*)$/
+    loop do
+      failed = false
+      info("= Starting global fatrace thread")
+      begin
+        last_popen_at = Time.now
+        IO.popen(cmd) do |io|
+          begin
+            while line = io.gets do
+              # Skip btrfs commands (defrag mostly)
+              next if line.start_with?("btrfs(")
+              if match = line.match(extract_write_re)
+                file = match[1]
+                handle_file_write(file)
+              else
+                error "Can't extract file from '#{line}'"
+              end
+              # TODO: Maybe don't check on each pass (benchmark this)
+              break if Time.now > (last_popen_at + FATRACE_TTL)
+              break if recent_new_fs?
+            end
+          rescue => ex
+            msg = "#{ex}\n#{ex.backtrace.join("\n")}"
+            error "Error in inner fatrace thread: #{msg}"
+            sleep 1 # Limit CPU load in case of bug
+          end
+        end
+      rescue => ex
+        failed = true
+        error "Error in outer fatrace thread: #{ex}"
+      end
+      next unless failed
+      # Arbitrary sleep to avoid CPU load in case of fatrace repeated failure
+      delay = 60
+      info("= Fatrace thread waiting #{delay}s before restart")
+      sleep delay
+    end
   end
 
   def update!(detect_new_fs: true)
@@ -2442,55 +2485,14 @@ end
 
 include Outputs
 
-def fatrace_file_writes(devs)
-  cmd = [ "fatrace", "-f", "W" ]
-  extract_write_re = /^[^(]+\([0-9]+\): [ORWC]+ (.*)$/
-  loop do
-    failed = false
-    info("= Starting global fatrace thread")
-    begin
-      last_popen_at = Time.now
-      IO.popen(cmd) do |io|
-        begin
-          while line = io.gets do
-            # Skip btrfs commands (defrag mostly)
-            next if line.start_with?("btrfs(")
-            if match = line.match(extract_write_re)
-              file = match[1]
-              devs.handle_file_write(file)
-            else
-              error "Can't extract file from '#{line}'"
-            end
-            # TODO: Maybe don't check on each pass (benchmark this)
-            break if Time.now > (last_popen_at + FATRACE_TTL)
-            break if devs.recent_new_fs?
-          end
-        rescue => ex
-          msg = "#{ex}\n#{ex.backtrace.join("\n")}"
-          error "Error in inner fatrace thread: #{msg}"
-          sleep 1 # Limit CPU load in case of bug
-        end
-      end
-    rescue => ex
-      failed = true
-      error "Error in outer fatrace thread: #{ex}"
-    end
-    next unless failed
-    # Arbitrary sleep to avoid CPU load in case of fatrace repeated failure
-    delay = 60
-    info("= Fatrace thread waiting #{delay}s before restart")
-    sleep delay
-  end
-end
-
 info "**********************************************"
 info "** Starting BTRFS defragmentation scheduler **"
 info "**********************************************"
 devs = BtrfsDevs.new
+# don't launch fatrace until devs are all accounted for
+# as it would trigger a fatrace restart
+devs.update!(detect_new_fs: false)
 Thread.new do
-  # don't launch fatrace until devs are all accounted for
-  devs.update!(detect_new_fs: false)
-  fatrace_file_writes(devs)
+  loop { sleep FS_DETECT_PERIOD; devs.update! }
 end
-
-loop { sleep FS_DETECT_PERIOD; devs.update! }
+devs.fatrace_file_writes
