@@ -1032,10 +1032,12 @@ class FilesState
     end
   end
 
+  # Not thread-safe but acceptable (rare false positives would be OK)
+  # In reality as we use it to find out if we should track a file
+  # and we remove tracking *after* marking a file defragmented, this ensures
+  # false positives don't have any consequence
   def recently_defragmented?(shortname)
-    @fragmentation_info_mutex.synchronize do
-      @recently_defragmented.recent?(shortname)
-    end
+    @recently_defragmented.recent?(shortname)
   end
 
   def defragmentation_rate(period: COST_HISTORY_TTL)
@@ -1062,10 +1064,8 @@ class FilesState
   # deframentations
   # (this would keep it small and should have the same behaviour)
   def defragmented!(shortname)
-    @fragmentation_info_mutex.synchronize do
-      @recently_defragmented.event(shortname)
-      serialize_recently_defragmented if must_serialize_recent?
-    end
+    @recently_defragmented.event(shortname)
+    serialize_recently_defragmented if must_serialize_recent?
     remove_tracking(shortname)
   end
 
@@ -1114,12 +1114,11 @@ class FilesState
     status
     shortname = @btrfs.short_filename(filename)
     return if recently_defragmented?(shortname)
-    @writes_mutex.synchronize do
-      if @written_files[shortname]
-        @written_files[shortname].write!
-      else
-        @written_files[shortname] = WriteEvents.new
-      end
+    write_events = @written_files[shortname]
+    if write_events
+      write_events.write!
+    else
+      @writes_mutex.synchronize { @written_files[shortname] = WriteEvents.new }
     end
   end
 
@@ -1638,6 +1637,9 @@ class BtrfsDev
     run_with_device_usage { system(*defrag_cmd, dir) }
     info " - #{dir}: root subvolume trees done" if $verbose
     @rw_subvols.each do |subvol|
+      # Let other threads have an opportunity to work as these are blocking
+      # Thread.pass should be enough but it doesn't offer any guarantee
+      Thread.pass; sleep 0.1
       info " - #{dir}: #{subvol} extent and subvolume trees" if $verbose
       run_with_device_usage { system(*defrag_cmd, subvol) }
       info " - #{dir}: #{subvol} trees done" if $verbose
