@@ -229,7 +229,7 @@ MIN_QUEUE_DEFRAG_SPEED_FACTOR = 0.2
 STATUS_PERIOD = 120 # every 2 minutes
 SLOW_STATUS_PERIOD = 1800 # every 30 minutes
 # How often do we check for new filesystems or umounted filesystems
-FS_DETECT_PERIOD = 60
+FS_DETECT_PERIOD = $debug ? 10 : 300
 # How often do we restart the fatrace thread ?
 # there were bugs where fatrace would stop reporting modifications under
 # some conditions (mounts or remounts, fatrace processes per mountpoint and
