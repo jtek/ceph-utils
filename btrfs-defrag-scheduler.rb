@@ -329,17 +329,14 @@ class AsyncSerializer
   def store_loop
     loop do
       to_store = @store_op_mutex.synchronize do
-        @store_tasks.select do |file, tstamps|
+        files = @store_tasks.select do |file, tstamps|
           tstamps[:last_write] < (Time.now - MIN_COMMIT_DELAY) ||
             tstamps[:first_write] < (Time.now - MAX_COMMIT_DELAY)
         end.keys
+        files.each { |file| @store_tasks.delete(file) }
+        files
       end
       to_store.each { |file| file_write(file) }
-      @store_op_mutex.synchronize do
-        to_store.each do |file|
-          @store_tasks.delete(file)
-        end
-      end
       delay_until_next_write_check
     end
   end
