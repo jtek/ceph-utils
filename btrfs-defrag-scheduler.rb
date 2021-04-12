@@ -286,7 +286,7 @@ Thread.abort_on_exception = true
 module HashEntrySerializer
   def serialize_entry(key, value, file)
     FileUtils.mkdir_p(File.dirname(file))
-    File.open(file, File::RDWR|File::CREAT|File::BINARY, 0644) { |f|
+    File.open(file, File::RDWR|File::CREAT|File::BINARY, 0644) do |f|
       f.flock(File::LOCK_EX)
       yaml = f.read
       hash = yaml.empty? ? {} : YAML.load(yaml) rescue {}
@@ -295,7 +295,7 @@ module HashEntrySerializer
       f.write(YAML.dump(hash))
       f.flush
       f.truncate(f.pos)
-    }
+    end
   end
 
   def unserialize_entry(key, file, op_id, default_value = nil)
