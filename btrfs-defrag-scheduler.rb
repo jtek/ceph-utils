@@ -855,8 +855,6 @@ class FilesState
     # to avoid spikes on rotations
     ROTATE_GROUPS = 2 ** 16
     ROTATE_SEGMENT = ROTATING_PERIOD.to_f / ROTATE_GROUPS
-    # Over which period approximately do we track the event rate
-    EVENT_RATE_PERIOD = 30 * 60
 
     attr_reader :size
 
