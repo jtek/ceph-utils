@@ -986,8 +986,8 @@ class FilesState
       end
       @bitarray = serialized_data["bitarray"]
       @last_tick = serialized_data["last_tick"]
-      @size = serialized_data["size"]
       @bitarray.force_encoding(Encoding::ASCII_8BIT)
+      @size = compute_size
     end
 
     # Expects a string
@@ -1023,15 +1023,30 @@ class FilesState
 
     def serialization_data
       {
-        "bitarray" => @bitarray,
-        "last_tick" => @last_tick,
-        "size" => @size,
+        # Dup is used for moving data because it isn't stored right away
+        # and @last_tick is reassigned while @bitarray is changed in place
+        # @bitarray.dup would be sufficient, but this makes it more robust
+        "bitarray" => @bitarray.dup,
+        "last_tick" => @last_tick.dup,
         "ttl" => IGNORE_AFTER_DEFRAG_DELAY,
         "bits_per_entry" => BITS_PER_ENTRY
       }
     end
 
     private
+
+    def compute_size
+      @size = 0
+      @bitarray.size.times do |byte_idx|
+        byte = @bitarray.getbyte(byte_idx)
+        next if byte == 0 # should be common
+        ENTRIES_PER_BYTE.times do
+          entry = byte & MAX_ENTRY_VALUE
+          @size += 1 if entry != 0
+          byte = (byte >> BITS_PER_ENTRY)
+        end
+      end
+    end
 
     def advance_clock_when_needed
       tick! while (@last_tick + @tick_interval) < Time.now
