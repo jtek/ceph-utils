@@ -396,6 +396,8 @@ class AsyncSerializer
                    dump(file)
                  end
                else
+                 # We don't call cleanup because info uses a mutex
+                 # this is not possible in a trap
                  dump(file)
                end
     FileUtils.mkdir_p(File.dirname(file))
