@@ -839,6 +839,8 @@ class FilesState
   # Idea: we can modify the tick delay value dynamically to try to keep size
   # below a portion of the bitarray (minimizing the false positive probability)
   class FuzzyEventTracker
+    include Outputs
+
     # Must be 1, 2, 4 or 8 depending on the precision objective
     # higher value can avoid temporary high spikes of queued files
     BITS_PER_ENTRY = 8
@@ -1781,6 +1783,7 @@ class BtrfsDev
     attr :slow_batch_size, :slow_batch_period
     include HashEntrySerializer
     include HumanFormat
+    include Outputs
 
     def initialize(dev:)
       @pass = :none
@@ -1791,6 +1794,21 @@ class BtrfsDev
       # ask us about current rate status)
       @target_stop_time = Time.now + SLOW_SCAN_PERIOD
       init_slow_batch_target
+    end
+
+    def scan_speed_rate(considered:)
+      if @filecount.nil? || @filecount == 0
+        "unknow"
+      elsif scan_time == 0
+        "init"
+      else
+        "%.1f%%" % (100 * (considered.to_f / @filecount) /
+                    (scan_time.to_f / SLOW_SCAN_PERIOD)).to_f
+      end
+    end
+
+    def set_slow_batch_target
+      @slow_batch_size, @slow_batch_period = slow_batch_target
     end
 
     def init_new_scan
@@ -1821,29 +1839,6 @@ class BtrfsDev
       previous_batch_time = Time.now - @last_slow_scan_batch_start
       sleep [ @slow_batch_period - previous_batch_time, 0 ].max
       @last_slow_scan_batch_start = Time.now
-    end
-
-    def set_slow_batch_target
-      @slow_batch_size, @slow_batch_period = slow_batch_target
-    end
-
-    def slow_batch_target
-      # If there isn't enough time or data, speed up
-      time_left = scan_time_left # cache it to avoid future negative values
-      return catching_up_batch_target(time_left: time_left) if time_left <= 0
-
-      # Maintain cruising speed if expected files are found and have time left
-      left = slow_scan_expected_left
-      return pass_batch_with_speed_factor if left <= 0
-
-      # If we don't know the filesystem yet make a fast first pass
-      # (rework for large and busy filesystems ?)
-      unless @filecount
-        return [ MAX_FILES_BATCH_SIZE, MIN_DELAY_BETWEEN_FILEFRAGS ]
-      end
-
-      ## Adaptive speed during normal scan
-      batch_target_for(files_left: left, time_left: time_left)
     end
 
     def catching_up?(considered:)
@@ -1877,17 +1872,6 @@ class BtrfsDev
       info "# #{@dev.dirname}, #{entry.inspect}" if total && $debug
     end
 
-    def scan_speed_rate(considered:)
-      if @filecount.nil? || @filecount == 0
-        "unknow"
-      elsif scan_time == 0
-        "init"
-      else
-        "%.1f%%" % (100 * (considered.to_f / @filecount) /
-                    (scan_time.to_f / SLOW_SCAN_PERIOD)).to_f
-      end
-    end
-
     def wait_slow_scan_restart
       # If @filecount.nil? we were counting files, restart fast
       sleep (if @filecount && scan_time_left > 0
@@ -1902,6 +1886,30 @@ class BtrfsDev
       return 0 unless @scan_start
 
       Time.now - @scan_start
+    end
+
+    def slow_batch_target
+      # If there isn't enough time or data, speed up
+      time_left = scan_time_left # cache it to avoid future negative values
+      return catching_up_batch_target(time_left: time_left) if time_left <= 0
+
+      # Maintain cruising speed if expected files are found and have time left
+      left = slow_scan_expected_left
+      return pass_batch_with_speed_factor if left <= 0
+
+      # If we don't know the filesystem yet make a fast first pass
+      # (rework for large and busy filesystems ?)
+      unless @filecount
+        return [ MAX_FILES_BATCH_SIZE, MIN_DELAY_BETWEEN_FILEFRAGS ]
+      end
+
+      ## Adaptive speed during normal scan
+      batch_target_for(files_left: left, time_left: time_left)
+    end
+
+    def serialize_filecount
+      entry = { processed: @processed, total: @filecount }
+      serialize_entry(FILE_COUNT_STORE, @dev.dir, entry)
     end
 
     private
