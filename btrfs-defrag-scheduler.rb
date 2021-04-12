@@ -3,6 +3,12 @@
 require 'getoptlong'
 require 'set'
 require 'digest'
+require 'thread'
+require 'find'
+require 'pathname'
+require 'yaml'
+require 'fileutils'
+require 'singleton'
 
 def help_exit
   script_name = File.basename($0)
@@ -272,11 +278,6 @@ module Outputs
   end
 end
 
-require 'find'
-require 'pathname'
-require 'yaml'
-require 'fileutils'
-
 Thread.abort_on_exception = true
 
 # Shared code for classes needing a storage
@@ -339,7 +340,6 @@ end
 # Thread-safe load checker (won't check load more than once per period
 # accross all threads)
 class LoadCheck
-  require 'singleton'
   require 'etc'
   include Singleton
 
