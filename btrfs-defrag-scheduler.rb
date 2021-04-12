@@ -280,39 +280,147 @@ end
 
 Thread.abort_on_exception = true
 
-# Shared code for classes needing a storage
-# note: write isn't safe, so we protect reads with rescue
-# Idea: centralize writes from all writers and optionnaly wait to commit
-# instead of commiting for every write
-module HashEntrySerializer
-  def serialize_entry(key, value, file)
+# Shared code for classes needing permanent storage
+# this doesn't write ASAP but wait at least MIN_COMMIT_DELAY for
+# other writes to the same backing file and at most MAX_COMMIT_DELAY
+# old entries are cleaned up if not accessed for more than MAX_AGE
+class AsyncSerializer
+  include Outputs
+  include Singleton
+
+  MIN_COMMIT_DELAY = $debug ? 5 : 60      # 1 minute
+  MAX_COMMIT_DELAY = $debug ? 30 : 300    # 5 minutes
+  MAX_AGE = $debug ? 3600 : 7 * 24 * 3600 # 1 week
+  # This makes sure we don't wait more than needed
+  LOOP_MAX_DELAY = MIN_COMMIT_DELAY
+
+  def initialize
+    @store_tasks = {}
+    @store_content = {}
+    @store_op_mutex = Mutex.new
+    @async_writer_thread = Thread.new { store_loop }
+  end
+
+  def serialize_entry(file, key, value)
+    now = Time.now
+    @store_content[file][key] = { last_write: now, data: value }
+    @store_tasks[file] ||= {}
+    @store_tasks[file][:first_write] ||= now
+    @store_tasks[file][:last_write] ||= now
+  end
+
+  def unserialize_entry(file, key, op_id, default_value)
+    file_load(file) unless @store_content[file]
+    info("= #{op_id}, #{key}: %sloaded" %
+         (@store_content[file][key] ? "" : "default "))
+    @store_content[file][key] ||= { last_write: Time.now, data: default_value }
+    @store_content[file][key][:data]
+  end
+
+  def stop_and_flush_all
+    puts "= Storing state"
+    Thread.kill @async_writer_thread
+    # Killing the writer protects against concurrent writes
+    @store_content.keys.each { |file| file_write(file, lock: false) }
+  end
+
+  private
+
+  def store_loop
+    loop do
+      to_store = @store_op_mutex.synchronize do
+        @store_tasks.select do |file, tstamps|
+          tstamps[:last_write] < (Time.now - MIN_COMMIT_DELAY) ||
+            tstamps[:first_write] < (Time.now - MAX_COMMIT_DELAY)
+        end.keys
+      end
+      to_store.each { |file| file_write(file) }
+      @store_op_mutex.synchronize do
+        to_store.each do |file|
+          @store_tasks.delete(file)
+        end
+      end
+      delay_until_next_write_check
+    end
+  end
+
+  def delay_until_next_write_check
+    max_expire = Time.now + LOOP_MAX_DELAY
+    next_expiration = @store_op_mutex.synchronize do
+      @store_tasks.values.map do |v|
+        [ v[:last_write] + MIN_COMMIT_DELAY,
+          v[:first_write] + MAX_COMMIT_DELAY ].min
+      end.min
+    end
+    expire_at = [ next_expiration, max_expire ].compact.min
+    # Sleep until a bit after expire_at to avoid now == expire_at
+    sleep [ (expire_at - Time.now) + 0.01, 0.01 ].max
+  end
+
+  # To call protected by @store_op_mutex
+  def cleanup_old_keys(file)
+    now = Time.now
+    # Cleanup old keys
+    @store_content[file].delete_if do |key, value|
+      to_delete = value[:last_write] < (now - MAX_AGE)
+      info "= #{file}: #{key} removed (not accessed recently)" if to_delete
+      to_delete
+    end
+  end
+
+  def file_load(file)
+    now = Time.now
+    @store_op_mutex.synchronize do
+      if File.file?(file)
+        File.open(file, 'r:ascii-8bit') do |f|
+          yaml = f.read
+          @store_content[file] = yaml.empty? ? {} : YAML.load(yaml) rescue {}
+          info "= #{file} loaded"
+        end
+      else
+        @store_content[file] = {}
+      end
+      # Migrate keys to new format
+      hash = @store_content[file]
+      hash.select do |key, value|
+        unless value[:last_write]
+          hash[key] = { last_write: now, data: value }
+        end
+      end
+      cleanup_old_keys(file)
+    end
+  end
+
+  def file_write(file, lock: true)
+    # Protect store content against write while dumping unless specified
+    to_store = if lock
+                 @store_op_mutex.synchronize do
+                   cleanup_old_keys(file)
+                   dump(file)
+                 end
+               else
+                 dump(file)
+               end
     FileUtils.mkdir_p(File.dirname(file))
     File.open(file, File::RDWR|File::CREAT|File::BINARY, 0644) do |f|
-      f.flock(File::LOCK_EX)
-      yaml = f.read
-      hash = yaml.empty? ? {} : YAML.load(yaml) rescue {}
-      hash[key] = value
-      f.rewind
-      f.write(YAML.dump(hash))
+      f.write(to_store)
       f.flush
       f.truncate(f.pos)
     end
   end
 
-  def unserialize_entry(key, file, op_id, default_value = nil)
-    if File.file?(file)
-      File.open(file, 'r:ascii-8bit') { |f|
-        f.flock(File::LOCK_EX)
-        yaml = f.read
-        hash = yaml.empty? ? {} : YAML.load(yaml) rescue {}
-        info("= #{key}, #{op_id}: %sloaded" %
-             (hash[key] ? "" : "default "))
-        hash[key] || default_value
-      }
-    else
-      info "= #{key}, #{op_id}: default loaded"
-      default_value
-    end
+  def dump(file)
+    YAML.dump(@store_content[file])
+  end
+end
+
+module HashEntrySerializer
+  def serialize_entry(file, key, value)
+    AsyncSerializer.instance.serialize_entry(file, key, value)
+  end
+
+  def unserialize_entry(file, key, op_id, default_value = nil)
+    AsyncSerializer.instance.unserialize_entry(file, key, op_id, default_value)
   end
 end
 
@@ -1001,6 +1109,13 @@ class FilesState
     @next_status_at = Time.now
   end
 
+  def flush_all
+    puts "= #{@btrfs.dirname}; flushing cost history"
+    _serialize_history
+    puts "= #{@btrfs.dirname}; flushing recent defragmentations"
+    serialize_recently_defragmented
+  end
+
   def any_interesting_file?
     @fragmentation_info_mutex.synchronize {
       TYPES.any? { |t| @file_fragmentations[t].any? }
@@ -1338,12 +1453,15 @@ class FilesState
   end
   def serialize_history
     return unless must_serialize_history?
-    serialize_entry(@btrfs.dir, @cost_achievement_history, HISTORY_STORE)
+    _serialize_history
     @last_history_serialized_at = Time.now
+  end
+  def _serialize_history
+    serialize_entry(HISTORY_STORE, @btrfs.dir, @cost_achievement_history)
   end
   def load_cost_history
     default_value = { compressed: [], uncompressed: [] }
-    @cost_achievement_history = unserialize_entry(@btrfs.dir, HISTORY_STORE,
+    @cost_achievement_history = unserialize_entry(HISTORY_STORE, @btrfs.dir,
                                                   "cost history", default_value)
 
     # Update previous versions without timestamps
@@ -1372,14 +1490,14 @@ class FilesState
   end
   def load_recently_defragmented
     @recently_defragmented =
-      FuzzyEventTracker.new(unserialize_entry(@btrfs.dir, RECENT_STORE,
+      FuzzyEventTracker.new(unserialize_entry(RECENT_STORE, @btrfs.dir,
                                               "recently defragmented"))
     @last_recent_serialized_at = Time.now
   end
   # Note: must be called protected by @fragmentation_info_mutex
   def serialize_recently_defragmented
-    serialize_entry(@btrfs.dir, @recently_defragmented.serialization_data,
-                    RECENT_STORE)
+    serialize_entry(RECENT_STORE, @btrfs.dir,
+                    @recently_defragmented.serialization_data)
     @last_recent_serialized_at = Time.now
   end
 
@@ -1525,6 +1643,8 @@ class BtrfsDev
   end
 
   def stop_processing
+    # This is the right time to store our state
+    flush_all
     [ @slow_scan_thread, @stat_thread, @defrag_thread,
       @write_consolidator_thread ].each do |thread|
       Thread.kill(thread) if thread
@@ -1866,8 +1986,7 @@ class BtrfsDev
       return unless do_update
 
       @filecount = total || @filecount
-      entry = { processed: @processed, total: @filecount }
-      serialize_entry(@dev.dir, entry, FILE_COUNT_STORE)
+      serialize_filecount
       @last_filecount_updated_at = now
       info "# #{@dev.dirname}, #{entry.inspect}" if total && $debug
     end
@@ -1887,6 +2006,13 @@ class BtrfsDev
 
       Time.now - @scan_start
     end
+
+    def flush_all
+      puts "= #{@dev.dirname}; flushing file count progress"
+      serialize_filecount
+    end
+
+    private
 
     def slow_batch_target
       # If there isn't enough time or data, speed up
@@ -1920,7 +2046,7 @@ class BtrfsDev
 
     def load_filecount
       default_value = { processed: 0, total: nil }
-      entry = unserialize_entry(@dev.dir, FILE_COUNT_STORE, "filecount",
+      entry = unserialize_entry(FILE_COUNT_STORE, @dev.dir, "filecount",
                                 default_value)
       @processed = entry[:processed]
       @filecount = entry[:total]
@@ -2281,6 +2407,11 @@ class BtrfsDev
     "#{dir}/"
   end
 
+  def flush_all
+    @files_state.flush_all
+    @rate_controller.flush_all
+  end
+
   class << self
     def list_subvolumes(dir)
       new_subdirs = []
@@ -2311,6 +2442,10 @@ class BtrfsDevs
     @new_fs = false
     # Used to find which dev handles which tree
     @dev_tree = {}
+  end
+
+  def flush_and_stop_all
+    @btrfs_devs.each(&:stop_processing)
   end
 
   def fatrace_file_writes
@@ -2484,16 +2619,35 @@ class BtrfsDevs
   end
 end
 
-include Outputs
+class Main
+  include Outputs
 
-info "**********************************************"
-info "** Starting BTRFS defragmentation scheduler **"
-info "**********************************************"
-devs = BtrfsDevs.new
-# don't launch fatrace until devs are all accounted for
-# as it would trigger a fatrace restart
-devs.update!(detect_new_fs: false)
-Thread.new do
-  loop { sleep FS_DETECT_PERIOD; devs.update! }
+  def initialize
+    info "**********************************************"
+    info "** Starting BTRFS defragmentation scheduler **"
+    info "**********************************************"
+    @devs = BtrfsDevs.new
+  end
+
+  def run
+    # don't launch fatrace until devs are all accounted for
+    # as it would trigger a fatrace restart
+    @devs.update!(detect_new_fs: false)
+    Thread.new { loop { sleep FS_DETECT_PERIOD; @devs.update! } }
+    @devs.fatrace_file_writes
+  end
+
+  def flush_all_exit
+    @devs.flush_and_stop_all
+    AsyncSerializer.instance.stop_and_flush_all
+    exit
+  end
 end
-devs.fatrace_file_writes
+
+@main = Main.new
+
+interrupt_handler = proc { @main.flush_all_exit }
+Signal.trap("INT", interrupt_handler)
+Signal.trap("TERM", interrupt_handler)
+
+@main.run
