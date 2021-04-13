@@ -1964,7 +1964,13 @@ class BtrfsDev
       # If we have to skip some files, skip the corresponding time period
       if @filecount && @filecount > 0 && @processed > 0
         # compute an approximate time start from the work already done
-        @scan_start -= (SLOW_SCAN_PERIOD * @processed.to_f / @filecount)
+        adjustement = if @processed <= @filecount
+                        SLOW_SCAN_PERIOD * @processed.to_f / @filecount
+                      else
+                        # processing accelerates after @filecount
+                        SLOW_SCAN_PERIOD + time_exceeded_for_processed
+                      end
+        @scan_start -= adjustement
       end
       @target_stop_time = @scan_start + SLOW_SCAN_PERIOD
       @last_slow_scan_batch_start = Time.now
@@ -2055,8 +2061,6 @@ class BtrfsDev
       serialize_entry(FILE_COUNT_STORE, @dev.dir, entry)
     end
 
-    private
-
     def scan_time_left
       @target_stop_time - Time.now
     end
@@ -2072,6 +2076,24 @@ class BtrfsDev
     # Get filecount or a default value (min 1 to avoid divide by 0)
     def expected_filecount
       [ @filecount || (SLOW_SCAN_PERIOD * max_speed), 1 ].max
+    end
+
+    # Called if @processed > @filecount, processing accelerates exponentially
+    # after @filecount (see catching_up_batch_target) we reproduce it there
+    # and scale back the acceleration (to avoid too much scan IO after restart)
+    def time_exceeded_for_processed
+      increments = 0
+      processed = 0
+      target = @processed - @filecount
+      loop do
+        processed += @pass_target_speed *
+                     (SLOW_SCAN_SPEED_INCREASE_STEP ** increments) *
+                     filefrag_speed_increase_period
+        break if processed > target
+        increments += 1
+      end
+      # Reduce the load artificially
+      (increments * filefrag_speed_increase_period) / 2
     end
 
     def max_speed
