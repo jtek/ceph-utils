@@ -330,6 +330,9 @@ class AsyncSerializer
     loop do
       to_store = @store_op_mutex.synchronize do
         files = @store_tasks.select do |file, tstamps|
+          # If there's only one entry, no use waiting
+          (@store_content[file].count == 1) ||
+            # Use delays to give a chance to others to join
           tstamps[:last_write] < (Time.now - MIN_COMMIT_DELAY) ||
             tstamps[:first_write] < (Time.now - MAX_COMMIT_DELAY)
         end.keys
