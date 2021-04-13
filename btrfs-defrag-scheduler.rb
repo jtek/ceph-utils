@@ -2069,11 +2069,13 @@ class BtrfsDev
       @filecount = entry[:total]
     end
 
-    # Get filecount or a default value
+    # Get filecount or a default value (min 1 to avoid divide by 0)
     def expected_filecount
-      [ @filecount ||
-        SLOW_SCAN_PERIOD * MAX_FILES_BATCH_SIZE / MIN_DELAY_BETWEEN_FILEFRAGS,
-        1 ].max
+      [ @filecount || (SLOW_SCAN_PERIOD * max_speed), 1 ].max
+    end
+
+    def max_speed
+      MAX_FILES_BATCH_SIZE / MIN_DELAY_BETWEEN_FILEFRAGS
     end
 
     def slow_scan_expected_left
