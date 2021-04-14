@@ -203,7 +203,7 @@ MIN_PERF_QUEUE_INTERVAL = 10
 FRAGMENTATION_INFO_DELAY_FACTOR = 2
 # Some files might be written to constantly, don't delay passing them to
 # filefrag more than that
-MAX_WRITES_DELAY = 4 * 3600
+MAX_WRITES_DELAY = 8 * 3600
 
 # Full refresh of fragmentation information on files happens in
 # (pass number of hours on commandline if the default is not optimal for you)
