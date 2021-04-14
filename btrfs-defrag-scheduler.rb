@@ -1665,6 +1665,11 @@ class BtrfsDev
         @files_state.consolidate_writes
       end
     end
+    # Use higher priority for threads which mostly sleep
+    # but can handle large memory structures and shouldn't wait
+    # too long to delete obsolete content
+    @write_consolidator_thread.priority = 1
+    @stat_thread.priority = 1
   end
 
   def stop_processing
