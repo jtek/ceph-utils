@@ -185,7 +185,7 @@ EXPECTED_COMPRESS_RATIO = 0.5
 
 # How many files do we track for writes, we pass these to the defragmentation
 # queue when activity stops (this amount limits memory usage)
-MAX_TRACKED_WRITTEN_FILES = 20_000
+MAX_TRACKED_WRITTEN_FILES = 40_000
 # Period over which to distribute defragmentation checks for files which
 # were written at the same time, this avoids filefrag call storms
 #DEFRAG_CHECK_DISTRIBUTION_PERIOD = 60
