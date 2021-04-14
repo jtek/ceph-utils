@@ -1246,11 +1246,19 @@ class FilesState
     status
     shortname = @btrfs.short_filename(filename)
     return if recently_defragmented?(shortname)
+
     write_events = @written_files[shortname]
     if write_events
+      # Don't waste time acquiring a Mutex here, if this entry is deleted
+      # concurrently there won't be any adverse effect
       write_events.write!
     else
       @writes_mutex.synchronize { @written_files[shortname] = WriteEvents.new }
+      if @written_files.size > (2 * MAX_TRACKED_WRITTEN_FILES)
+        info("** %s write tracking explosion, emergency consolidate_writes" %
+             @btrfs.dirname)
+        consolidate_writes
+      end
     end
   end
 
@@ -1366,8 +1374,8 @@ class FilesState
           candidates << short
           @written_files.delete(short)
         }
-        info "** %s writes tracking overflow: %d files queued for defrag" %
-          [ @btrfs.dirname, to_remove ]
+        info("** %s writes tracking overflow: %d files queued for defrag" %
+             [ @btrfs.dirname, to_remove ])
       end
       candidates
     end
