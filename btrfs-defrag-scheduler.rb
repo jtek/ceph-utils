@@ -184,26 +184,17 @@ DEVICE_LOAD_WINDOW = DEVICE_USE_LIMITS.keys.max
 EXPECTED_COMPRESS_RATIO = 0.5
 
 # How many files do we track for writes, we pass these to the defragmentation
-# queue when activity stops (this amount limits memory usage)
-MAX_TRACKED_WRITTEN_FILES = 40_000
-# Period over which to distribute defragmentation checks for files which
-# were written at the same time, this avoids filefrag call storms
-#DEFRAG_CHECK_DISTRIBUTION_PERIOD = 60
-# How often do we select files written to for fragmentation checks
-MIN_WRITTEN_FILES_CONSOLIDATION_PERIOD = 60
-# Default Btrfs commit delay when none is specified
-# it's otherwise parsed from /proc/mounts
-DEFAULT_COMMIT_DELAY = 30
-# How often do we check for defragmentation progress
-PERF_QUEUE_INTERVAL = 20
-# Enforce a minimum of 10 seconds between checks (if they take too long)
-MIN_PERF_QUEUE_INTERVAL = 10
-# Fragmentation information isn't available right after the last write or even
-# commit (as in commit_delay of the filesystem)
-FRAGMENTATION_INFO_DELAY_FACTOR = 2
+# queue when write activity stops (this amount limits memory and CPU usage)
+MAX_TRACKED_WRITTEN_FILES = 10_000
+# Additional delay waiting for write expiration after next predicted expiration
+WRITTEN_FILES_CONSOLIDATION_PERIOD = 10
+# No writes for that many seconds is interpreted as write activity stopped
+STOPPED_WRITING_DELAY = 15
 # Some files might be written to constantly, don't delay passing them to
 # filefrag more than that
 MAX_WRITES_DELAY = 8 * 3600
+# How often do we check for defragmentation progress if there are none
+DEFAULT_PERF_QUEUE_INTERVAL = 20
 
 # Full refresh of fragmentation information on files happens in
 # (pass number of hours on commandline if the default is not optimal for you)
@@ -226,6 +217,12 @@ MAX_DELAY_BETWEEN_FILEFRAGS = 120 / $speed_multiplier
 MAX_FILES_BATCH_SIZE = MAX_QUEUE_LENGTH / 4
 MIN_FILES_BATCH_SIZE = 1
 
+# If the background thread consolidating writes can't be scheduled soon enough
+# we trigger an emergency consolidation to avoid slowing down more as
+# having a very large number of tracked written files slows the tracking itself
+EMERGENCY_WRITE_CONSOLIDATION_THRESHOLD =
+  MAX_TRACKED_WRITTEN_FILES + MAX_FILES_BATCH_SIZE
+
 # We ignore files recently defragmented for 12 hours
 IGNORE_AFTER_DEFRAG_DELAY = 12 * 3600
 
@@ -242,10 +239,6 @@ FS_DETECT_PERIOD = $debug ? 10 : 300
 # old fatrace version), it might not apply anymore but this doesn't put any
 # measurable load on the system and we are unlikely to miss files
 FATRACE_TTL = 24 * 3600 # every day
-# How often do we check the subvolumes list ?
-# it can be costly but we need them to avoid defragmenting read-only snapshots
-# (we consider these not useful to defragment)
-SUBVOL_TTL = 3600
 
 # System dependent (reserve 100 for cmd and 4096 for one path entry)
 FILEFRAG_ARG_MAX = 131072 - 100 - 4096
@@ -257,11 +250,17 @@ FILE_COUNT_STORE = "#{STORE_DIR}/filecounts.yml"
 HISTORY_STORE    = "#{STORE_DIR}/costs.yml"
 RECENT_STORE     = "#{STORE_DIR}/recent.yml"
 
+# Default Btrfs commit delay when none is specified
+# it's otherwise parsed from /proc/mounts
+DEFAULT_COMMIT_DELAY = 30
+
 # Per filesystem defrag blacklist
 DEFRAG_BLACKLIST_FILE = ".no_defrag"
 
 # Synchronize multithreaded outputs
 $output_mutex = Mutex.new
+STDOUT.sync = true
+STDERR.sync = true
 
 module Outputs
   def short_tstamp
@@ -278,6 +277,23 @@ module Outputs
   end
 end
 
+module Delaying
+  def delay_until(tstamp, min_sleep: 0)
+    now = Time.now
+    if tstamp <= now
+      delay(min_sleep)
+    else
+      sleep [ tstamp - now, min_sleep ].max
+    end
+  end
+
+  def delay(amount)
+    return if amount <= 0
+
+    sleep amount
+  end
+end
+
 Thread.abort_on_exception = true
 
 # Shared code for classes needing permanent storage
@@ -287,6 +303,7 @@ Thread.abort_on_exception = true
 class AsyncSerializer
   include Outputs
   include Singleton
+  include Delaying
 
   MIN_COMMIT_DELAY = $debug ? 5 : 60      # 1 minute
   MAX_COMMIT_DELAY = $debug ? 30 : 300    # 5 minutes
@@ -353,8 +370,7 @@ class AsyncSerializer
       end.min
     end
     expire_at = [ next_expiration, max_expire ].compact.min
-    # Sleep until a bit after expire_at to avoid now == expire_at
-    sleep [ (expire_at - Time.now) + 0.01, 0.01 ].max
+    delay_until(expire_at, min_sleep: 0.01)
   end
 
   # To call protected by @store_op_mutex
@@ -447,6 +463,35 @@ module HumanFormat
   end
 end
 
+# Class that handles running simple asynchronous tasks
+# each task is a block that returns the next tstamp it wants to run at
+# doesn't support running without a task
+class AsyncRunner
+  include Delaying
+
+  def initialize(name)
+    @name = name
+    @tasks = {}
+  end
+
+  def run
+    loop do
+      now = Time.now
+      @tasks.each do |block, run_at|
+        next if run_at > now
+
+        @tasks[block] = block.call
+        now = Time.now
+      end
+      delay_until @tasks.values.min
+    end
+  end
+
+  def add_task(time = Time.now, &block)
+    @tasks[block] = time
+  end
+end
+
 # Thread-safe load checker (won't check load more than once per period
 # accross all threads)
 class LoadCheck
@@ -515,9 +560,11 @@ class UsagePolicyChecker
     result
   end
 
-  def delay_until_available(expected_time: 0, use_limit_factor: 1)
-    [ available_at(expected_time: expected_time,
-                   use_limit_factor: use_limit_factor) - Time.now, 0 ].max
+  def available_at(expected_time: 0, use_limit_factor: 1)
+    cleanup
+    DEVICE_USE_LIMITS.keys.map do |window|
+      next_available_for(window, expected_time, use_limit_factor)
+    end.max
   end
 
   # Might move the following to global constants/parameters later
@@ -551,13 +598,6 @@ class UsagePolicyChecker
 
   def add_usage(start, stop)
     @device_uses << [ start, stop ]
-  end
-
-  def available_at(expected_time: 0, use_limit_factor:)
-    cleanup
-    DEVICE_USE_LIMITS.keys.map do |window|
-      next_available_for(window, expected_time, use_limit_factor)
-    end.max
   end
 
   def cleanup
@@ -866,6 +906,8 @@ class FileFragmentation
   end
 
   class << self
+    include Delaying
+
     def batch_init(filelist, btrfs)
       frags = []
       until filelist.empty?
@@ -878,7 +920,7 @@ class FileFragmentation
     end
 
     def batch_step(files, btrfs)
-      sleep btrfs.delay_until_available_for_filefrag
+      delay_until btrfs.available_for_filefrag_at
       frags = []
       start = Time.now
       btrfs.run_with_device_usage do
@@ -908,29 +950,6 @@ class WriteEvents
   def write!
     @last = Time.now
   end
-
-  # Deprecated? : fragmentation checks avalanche should not be a problem
-  # anymore, they are done asynchronously and through run_with_device_usage
-  # We suppose a file which is recently modified has higher chances of a
-  # near-future modification, so we delay its check for defragmentation
-  # commit_delay is used to avoid triggering fragmentation checks too early
-  # by experience the fragmentation information is only updated after commits,
-  # not after writes
-  # def ready_for_frag_check?(commit_delay)
-  #   now = Time.now
-  #   # We add a small delay to account for unexpected latencies
-  #   after_write_delay = commit_delay * FRAGMENTATION_INFO_DELAY_FACTOR
-  #   (last < (now - after_write_delay - fuzzy_delay)) ||
-  #     (first < (now - MAX_WRITES_DELAY))
-  # end
-
-  # private
-
-  # # This avoids an avalanche of fragmentation checks, use most noisy
-  # # bits of first timestamp
-  # def fuzzy_delay
-  #   first.usec % DEFRAG_CHECK_DISTRIBUTION_PERIOD
-  # end
 end
 
 # Maintain the status of all candidates for defragmentation for a given
@@ -1123,7 +1142,10 @@ class FilesState
 
     @written_files = {}
     @writes_mutex = Mutex.new
-    @next_status_at = Time.now
+  end
+
+  def status_at=(status_at)
+    @status_at = status_at
   end
 
   def flush_all
@@ -1243,7 +1265,6 @@ class FilesState
   end
 
   def file_written_to(filename)
-    status
     shortname = @btrfs.short_filename(filename)
     return if recently_defragmented?(shortname)
 
@@ -1254,11 +1275,11 @@ class FilesState
       write_events.write!
     else
       @writes_mutex.synchronize { @written_files[shortname] = WriteEvents.new }
-      if @written_files.size > (2 * MAX_TRACKED_WRITTEN_FILES)
-        info("** %s write tracking explosion, emergency consolidate_writes" %
-             @btrfs.dirname)
-        consolidate_writes
-      end
+      return if @written_files.size <= EMERGENCY_WRITE_CONSOLIDATION_THRESHOLD
+
+      info("** %s write tracking explosion, emergency consolidate_writes" %
+           @btrfs.dirname)
+      consolidate_writes
     end
   end
 
@@ -1266,7 +1287,6 @@ class FilesState
     key = file_frag.majority_compressed? ? :compressed : :uncompressed
     history = @cost_achievement_history[key]
     history << [ initial_cost, final_cost, size, Time.now.to_i ]
-    compute_thresholds
     serialize_history
   end
 
@@ -1306,8 +1326,6 @@ class FilesState
   end
 
   def status
-    now = Time.now
-    return if @next_status_at > now
     last_compressed_cost =
       @fragmentation_info_mutex.synchronize {
       @file_fragmentations[:compressed][0] ?
@@ -1345,19 +1363,20 @@ class FilesState
              @written_files.size, @recently_defragmented.size,
              @btrfs.scan_status ])
     end
-    # We might skip a few on occasion
-    @next_status_at += STATUS_PERIOD while now > @next_status_at
+    # Skip can happen (suspend for example)
+    @status_at += STATUS_PERIOD while Time.now > @status_at
+    @status_at
   end
 
   def consolidate_writes
-    batch = @writes_mutex.synchronize do
+    batch, min_last = @writes_mutex.synchronize do
       # used for each entry
       # delay = @btrfs.commit_delay
-      threshold =
-        Time.now - (FRAGMENTATION_INFO_DELAY_FACTOR * @btrfs.commit_delay)
+      threshold = Time.now - STOPPED_WRITING_DELAY
+      old_threshold = Time.now - MAX_WRITES_DELAY
       # Detect writen files whose fragmentation should be checked
       candidates = @written_files.select do |shortname, value|
-        value.last < threshold
+        (value.last < threshold) || (value.first < old_threshold)
       end.keys
 
       # Remove them from @written_files before update_files as it filters
@@ -1368,43 +1387,32 @@ class FilesState
       # defragmentation queue
       if @written_files.size > MAX_TRACKED_WRITTEN_FILES
         to_remove = @written_files.size - MAX_TRACKED_WRITTEN_FILES
-        @written_files.keys.sort_by { |short|
+        keys_to_remove = @written_files.keys.sort_by do |short|
           @written_files[short].last
-        }[0...to_remove].each { |short|
+        end[0...to_remove]
+        keys_to_remove.each do |short|
           candidates << short
           @written_files.delete(short)
-        }
+        end
         info("** %s writes tracking overflow: %d files queued for defrag" %
              [ @btrfs.dirname, to_remove ])
       end
-      candidates
+      [ candidates, @written_files.values.map(&:last).min ]
     end
 
     # Use full filenames and filter deleted files
     batch.map! { |short| @btrfs.full_filename(short) }
          .select! { |filename| File.file?(filename)}
     update_files(FileFragmentation.batch_init(batch, @btrfs))
-  end
-
-  private
-  # MUST be protected by @fragmentation_info_mutex
-  def next_available_type
-    next_type =
-      @fetch_accumulator.keys.find { |type| @fetch_accumulator[type] >= 1.0 }
-    # In case of Float rounding errors we might not have any available next_type
-    case next_type
-    when :compressed
-      @file_fragmentations[:compressed].any? ? :compressed : :uncompressed
-    else
-      @file_fragmentations[:uncompressed].any? ? :uncompressed : :compressed
-    end
+    # When should we restart ?
+    (min_last ? min_last + STOPPED_WRITING_DELAY : Time.now) +
+      WRITTEN_FILES_CONSOLIDATION_PERIOD
   end
 
   # each achievement is [ initial_cost, final_cost, file_size ]
   # file_size is currently ignored (the target was jumping around on filesystems
   # with very diverse file sizes)
   def compute_thresholds
-    return unless @last_thresholds_at < (Time.now - COST_COMPUTE_DELAY)
     cleanup_cost_history
     TYPES.each do |key|
       key_history = @cost_achievement_history[key]
@@ -1448,7 +1456,20 @@ class FilesState
       @average_costs[key] = final_accu / total_weight
       @initial_costs[key] = initial_accu / total_weight
     end
-    @last_thresholds_at = Time.now
+  end
+
+  private
+  # MUST be protected by @fragmentation_info_mutex
+  def next_available_type
+    next_type =
+      @fetch_accumulator.keys.find { |type| @fetch_accumulator[type] >= 1.0 }
+    # In case of Float rounding errors we might not have any available next_type
+    case next_type
+    when :compressed
+      @file_fragmentations[:compressed].any? ? :compressed : :uncompressed
+    else
+      @file_fragmentations[:uncompressed].any? ? :uncompressed : :compressed
+    end
   end
 
   # The threshold can be raised so high by a succession of difficult files
@@ -1565,7 +1586,6 @@ class FilesState
     TYPES.map{ |t| queue_size(t) }.inject(&:+)
   end
   def threshold_cost(frag)
-    compute_thresholds
     if frag.majority_compressed?
       @cost_thresholds[:compressed]
     else
@@ -1582,6 +1602,7 @@ class BtrfsDev
   include Outputs
   include HashEntrySerializer
   include HumanFormat
+  include Delaying
 
   # create the internal structures, including references to other mountpoints
   def initialize(dir, dev_fs_map)
@@ -1647,7 +1668,8 @@ class BtrfsDev
   end
 
   def start_processing
-    @stat_thread = Thread.new { handle_perf_queue_progress }
+    # Pre-init these (used by slow_status and slow_files_state_update
+    @considered = @already_processed = @recent = @queued = 0
     @slow_scan_thread = Thread.new do
       info("## Beginning files list updater thread for #{dir}")
       slow_files_state_update(first_pass: true)
@@ -1656,27 +1678,29 @@ class BtrfsDev
         slow_files_state_update
       end
     end
-    @defrag_thread = Thread.new do
-      loop { defrag!; sleep delay_until_available_for_defrag }
+
+    @files_state.status_at = @slow_status_at = Time.now
+    runner = AsyncRunner.new(dirname)
+    runner.add_task { @files_state.consolidate_writes }
+    runner.add_task { handle_perf_queue_progress }
+    runner.add_task do
+      defrag!
+      available_for_defrag_at
     end
-    @write_consolidator_thread = Thread.new do
-      loop do
-        sleep MIN_WRITTEN_FILES_CONSOLIDATION_PERIOD
-        @files_state.consolidate_writes
-      end
+    runner.add_task { slow_status }
+    runner.add_task { @files_state.status }
+    runner.add_task do
+      @files_state.compute_thresholds
+      Time.now + COST_COMPUTE_DELAY
     end
-    # Use higher priority for threads which mostly sleep
-    # but can handle large memory structures and shouldn't wait
-    # too long to delete obsolete content
-    @write_consolidator_thread.priority = 1
-    @stat_thread.priority = 1
+    @async_thread = Thread.new { runner.run }
+    @async_thread.priority = 1
   end
 
   def stop_processing
     # This is the right time to store our state
     flush_all
-    [ @slow_scan_thread, @stat_thread, @defrag_thread,
-      @write_consolidator_thread ].each do |thread|
+    [ @slow_scan_thread, @async_thread ].each do |thread|
       Thread.kill(thread) if thread
     end
   end
@@ -1692,45 +1716,59 @@ class BtrfsDev
     @perf_queue_mutex.synchronize do
       @files_in_defragmentation[file_frag] = {
         queued_at: queued_at,
-        last_change: queued_at,
-        last_cost: file_frag.fragmentation_cost,
         start_cost: file_frag.fragmentation_cost,
         size: file_frag.size
       }
     end
   end
 
-  def handle_perf_queue_progress
+  def loop_over_async_tasks
+    now = Time.now
+    next_perf_queue_at = now
+    next_write_consolidation_at = now + MIN_WRITTEN_FILES_CONSOLIDATION_PERIOD
     loop do
-      check_start = Time.now
-      to_remove = []
-      @perf_queue_mutex.synchronize do
-        @files_in_defragmentation.each do |file_frag, value|
-          last_change = value[:last_change]
-          defrag_time = Time.now - value[:queued_at]
-          # Cases where we can stop and register the costs
-          if value[:last_cost] == 1.0 ||
-             (defrag_time >
-              (file_frag.fs_commit_delay + (2 * PERF_QUEUE_INTERVAL)))
-            to_remove << file_frag
-            @files_state.historize_cost_achievement(file_frag,
-                                                    value[:start_cost],
-                                                    value[:last_cost],
-                                                    value[:size])
-          elsif defrag_time > file_frag.fs_commit_delay
-            file_frag.update_fragmentation
-            # if it went up its because of concurrent activity, ignore
-            if file_frag.fragmentation_cost < value[:last_cost]
-              value[:last_cost] = file_frag.fragmentation_cost
-              value[:last_change] = Time.now
-            end
-          end
-        end
-        to_remove.each { |frag| @files_in_defragmentation.delete(frag) }
+      now = Time.now
+      if next_perf_queue_at < now
+        next_perf_queue_at = handle_perf_queue_progress
+        now = Time.now
       end
-      wait = (check_start + PERF_QUEUE_INTERVAL) - Time.now
-      sleep [ wait, MIN_PERF_QUEUE_INTERVAL ].max
+      if next_write_consolidation_at < now
+        @files_state.consolidate_writes
+        next_write_consolidation_at =
+          Time.now + MIN_WRITTEN_FILES_CONSOLIDATION_PERIOD
+      end
+      delay_until [ next_perf_queue_at, next_write_consolidation_at ].min
     end
+  end
+
+  # Returns when to be reactivated based on @files_in_defragmentation
+  def handle_perf_queue_progress
+    to_remove = []
+    next_queued_at = nil
+    @perf_queue_mutex.synchronize do
+      @files_in_defragmentation.each do |file_frag, value|
+        delay_after_defrag = Time.now - value[:queued_at]
+        # Stop when entries are too recent (Hash is ordered by insertion time)
+        if delay_after_defrag < commit_delay
+          next_queued_at = value[:queued_at]
+          break
+        end
+
+        to_remove << file_frag
+        file_frag.update_fragmentation
+        # Don't consider fragmentation increases
+        new_fragmentation =
+          [ value[:start_cost], file_frag.fragmentation_cost ].min
+        @files_state.historize_cost_achievement(file_frag,
+                                                value[:start_cost],
+                                                new_fragmentation,
+                                                value[:size])
+      end
+      to_remove.each { |frag| @files_in_defragmentation.delete(frag) }
+    end
+    return next_queued_at + commit_delay if next_queued_at
+
+    Time.now + DEFAULT_PERF_QUEUE_INTERVAL
   end
 
   def claim_file_write(filename)
@@ -1765,7 +1803,6 @@ class BtrfsDev
     return unless file_frag
 
     # To avoid long runs without status if there are files to defragment
-    @files_state.status
     shortname = file_frag.short_filename
     # We declare it defragmented ASAP to avoid a double queue
     @files_state.defragmented!(shortname)
@@ -1859,8 +1896,8 @@ class BtrfsDev
     @checker.run_with_device_usage(&block)
   end
 
-  def delay_until_available_for_filefrag
-    @checker.delay_until_available
+  def available_for_filefrag_at
+    @checker.available_at
   end
 
   def scan_status
@@ -1934,6 +1971,7 @@ class BtrfsDev
     include HashEntrySerializer
     include HumanFormat
     include Outputs
+    include Delaying
 
     def initialize(dev:)
       @pass = :none
@@ -1992,8 +2030,7 @@ class BtrfsDev
 
     def wait_next_slow_scan_pass(considered:)
       update_filecount(processed: considered)
-      previous_batch_time = Time.now - @last_slow_scan_batch_start
-      sleep [ @slow_batch_period - previous_batch_time, 0 ].max
+      delay_until(@last_slow_scan_batch_start + @slow_batch_period)
       @last_slow_scan_batch_start = Time.now
     end
 
@@ -2122,8 +2159,8 @@ class BtrfsDev
       params = { files_left: expected_filecount,
                  time_left: SLOW_SCAN_PERIOD }
       @pass_target_speed =
-        filefrag_speed_target(params.merge(ignore_speed_factor: true))
-      @slow_batch_size, @slow_batch_period = batch_target_for(params)
+        filefrag_speed_target(**params.merge(ignore_speed_factor: true))
+      @slow_batch_size, @slow_batch_period = batch_target_for(**params)
     end
 
     def pass_batch_with_speed_factor
@@ -2196,8 +2233,8 @@ class BtrfsDev
   # Slowly update files, targeting a SLOW_SCAN_PERIOD period for all updates
   def slow_files_state_update(first_pass: false)
     @rate_controller.init_new_scan
-    @considered = already_processed = recent = @queued = 0
-    @slow_status_at = @last_slow_scan_batch_start = Time.now
+    @considered = @already_processed = @recent = @queued = 0
+    @last_slow_scan_batch_start = Time.now
     @batch = Batch.new(batch_size: @rate_controller.slow_batch_size) do
       queue_slow_scan_batch
       @rate_controller.wait_next_slow_scan_pass(considered: @considered)
@@ -2205,7 +2242,6 @@ class BtrfsDev
     end
     begin
       Find.find(dir) do |path|
-        slow_status(already_processed, recent)
         (Find.prune; next) if prune?(path)
 
         # ignore files with unparsable names
@@ -2220,13 +2256,13 @@ class BtrfsDev
 
         # Ignore recently processed files
         if @files_state.recently_defragmented?(short_name)
-          already_processed += 1
+          @already_processed += 1
           @batch.add_ignored
           next
         end
         # Ignore tracked files
         if @files_state.tracking_writes?(short_name)
-          recent += 1; @batch.add_ignored
+          @recent += 1; @batch.add_ignored
           next
         end
         # A file small enough to fit a node can't be fragmented
@@ -2251,7 +2287,7 @@ class BtrfsDev
     queue_slow_scan_batch
     # Store the amount of files found
     @rate_controller.update_filecount(processed: 0, total: @considered)
-    files_state_update_report(already_processed, recent)
+    files_state_update_report
     @rate_controller.wait_slow_scan_restart
   end
 
@@ -2353,17 +2389,14 @@ class BtrfsDev
     @average_file_time * @rate_controller.slow_batch_size
   end
 
-  def slow_status(already_processed, recent)
+  def slow_status
     now = Time.now
-    return if @slow_status_at > now
-    # This handles large slowdowns and suspends without spamming the log
-    @slow_status_at += SLOW_STATUS_PERIOD until @slow_status_at > now
     defrag_rate =
       @files_state.defragmentation_rate(period: COST_THRESHOLD_TRUST_PERIOD)
     msg = ("$ %s %d/%ds: %d queued / %d found, " \
            "%d recent defrag (fuzzy), %d tracked, %.1f defrag/h") %
           [ @dirname, @rate_controller.scan_time.to_i, SLOW_SCAN_PERIOD,
-            @queued, @considered, already_processed, recent,
+            @queued, @considered, @already_processed, @recent,
             3600 * defrag_rate ]
     if @files_state.last_queue_overflow_at &&
        (@files_state.last_queue_overflow_at > (now - SLOW_SCAN_PERIOD))
@@ -2371,28 +2404,24 @@ class BtrfsDev
         " ovf: %ds ago" % (now - @files_state.last_queue_overflow_at).to_i
     end
     info msg
-    # We call it there too because if there isn't writes it isn't called
-    # so this ensures regular updates
-    @files_state.status
+    # This handles large slowdowns and suspends without spamming the log
+    @slow_status_at += SLOW_STATUS_PERIOD until @slow_status_at > now
+    @slow_status_at
   end
 
-  def files_state_update_report(already_processed, recent)
-    # Force slow status display
-    @slow_status_at = Time.now
+  def files_state_update_report
     info "$# %s full scan report" % @dirname
-    slow_status(already_processed, recent)
+    slow_status
   end
 
-  def delay_until_available_for_defrag
+  def available_for_defrag_at
     next_defrag_duration = @files_state.next_defrag_duration
     if next_defrag_duration
-      @checker.delay_until_available(expected_time: next_defrag_duration,
-                                     use_limit_factor:
-                                       low_queue_defrag_speed_factor)
+      @checker.available_at(expected_time: next_defrag_duration,
+                            use_limit_factor: low_queue_defrag_speed_factor)
     else
-      # avoid busy loop, this is the maximum wait delay_until_available
-      # could return
-      sleep DEVICE_LOAD_WINDOW
+      # avoid busy loop, this is the maximum wait available_at could return
+      Time.now + DEVICE_LOAD_WINDOW
     end
   end
 
