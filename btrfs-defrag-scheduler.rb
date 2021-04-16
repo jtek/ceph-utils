@@ -185,9 +185,9 @@ EXPECTED_COMPRESS_RATIO = 0.5
 # queue when write activity stops (this amount limits memory and CPU usage)
 MAX_TRACKED_WRITTEN_FILES = 10_000
 # Additional delay waiting for write expiration after next predicted expiration
-WRITTEN_FILES_CONSOLIDATION_PERIOD = 10
+WRITTEN_FILES_CONSOLIDATION_PERIOD = 15
 # No writes for that many seconds is interpreted as write activity stopped
-STOPPED_WRITING_DELAY = 15
+STOPPED_WRITING_DELAY = 5
 # Some files might be written to constantly, don't delay passing them to
 # filefrag more than that
 MAX_WRITES_DELAY = 8 * 3600
