@@ -609,9 +609,8 @@ class UsagePolicyChecker
   end
 
   def cleanup
-    # Adapt period to current load, keep a buffer to anticipate rise in load
     this_start = Time.now
-    # Cleanup the device uses
+    # Cleanup the device uses, remove everything ending before used window
     @device_uses.shift while (first = @device_uses.first) &&
                              first[1] < (this_start - DEVICE_LOAD_WINDOW)
   end
@@ -621,7 +620,7 @@ class UsagePolicyChecker
     use_factor = use_limit_factor / LoadCheck.instance.slowdown_ratio
     target = DEVICE_USE_LIMITS[window] * use_factor
     # When will it reach the target use_ratio ?
-    return now + dichotomy(0..window, target, 0.001) do |wait|
+    return now + dichotomy(0..window, target, 0.01) do |wait|
       use_ratio(now + wait - window, window, expected_time)
     end
   end
