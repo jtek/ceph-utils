@@ -441,6 +441,16 @@ module HashEntrySerializer
 end
 
 module HumanFormat
+  def human_size(size)
+    suffixes = [ "B", "kiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB" ]
+    prefix = size.to_f
+    while (prefix > 1024) && (suffixes.size > 1)
+      prefix = prefix / 1024
+      suffixes.shift
+    end
+    "%.4g%s" % [ prefix, suffixes.shift ]
+  end
+
   def human_delay_since(timestamp)
     return "unknown" unless timestamp
 
@@ -858,15 +868,6 @@ class FileFragmentation
   end
   def compress_type
     @majority_compressed ? :compressed : :uncompressed
-  end
-  def human_size
-    suffixes = [ "B", "kiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB" ]
-    prefix = @size.to_f
-    while (prefix > 1024) && (suffixes.size > 1)
-      prefix = prefix / 1024
-      suffixes.shift
-    end
-    "%.4g%s" % [ prefix, suffixes.shift ]
   end
 
   # Note: we don't use run_with_device_usage here because this is done
@@ -1800,7 +1801,7 @@ class BtrfsDev
       mtime = File.mtime(file_frag.filename) rescue nil
       msg = " - %s: %s %s,%s,%.2f,%s" %
             [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
-              file_frag.human_size, file_frag.fragmentation_cost,
+              human_size(file_frag.size), file_frag.fragmentation_cost,
               human_delay_since(mtime) ]
       info(msg)
     end
