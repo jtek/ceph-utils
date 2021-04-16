@@ -1276,11 +1276,6 @@ class FilesState
       write_events.write!
     else
       @writes_mutex.synchronize { @written_files[shortname] = WriteEvents.new }
-      return if @written_files.size <= EMERGENCY_WRITE_CONSOLIDATION_THRESHOLD
-
-      info("** %s write tracking explosion, emergency consolidate_writes" %
-           @btrfs.dirname)
-      consolidate_writes
     end
   end
 
