@@ -1142,6 +1142,7 @@ class FilesState
 
     @written_files = {}
     @writes_mutex = Mutex.new
+    @to_filefrag = Queue.new
   end
 
   def status_at=(status_at)
@@ -1403,10 +1404,18 @@ class FilesState
     # Use full filenames and filter deleted files
     batch.map! { |short| @btrfs.full_filename(short) }
          .select! { |filename| File.file?(filename)}
-    update_files(FileFragmentation.batch_init(batch, @btrfs))
+    # Don't block caller too long
+    @to_filefrag.push batch
     # When should we restart ?
     (min_last ? min_last + STOPPED_WRITING_DELAY : Time.now) +
       WRITTEN_FILES_CONSOLIDATION_PERIOD
+  end
+
+  def filefrag_loop
+    loop do
+      list = @to_filefrag.pop
+      update_files(FileFragmentation.batch_init(list, @btrfs))
+    end
   end
 
   # each achievement is [ initial_cost, final_cost, file_size ]
@@ -1678,6 +1687,7 @@ class BtrfsDev
         slow_files_state_update
       end
     end
+    @fragmentation_updater_thread = Thread.new { @files_state.filefrag_loop }
 
     @files_state.status_at = @slow_status_at = Time.now
     runner = AsyncRunner.new(dirname)
@@ -1700,7 +1710,8 @@ class BtrfsDev
   def stop_processing
     # This is the right time to store our state
     flush_all
-    [ @slow_scan_thread, @async_thread ].each do |thread|
+    [ @slow_scan_thread, @async_thread,
+      @fragmentation_updater_thread ].each do |thread|
       Thread.kill(thread) if thread
     end
   end
