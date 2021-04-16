@@ -174,10 +174,8 @@ QUEUE_PROPORTION_EQUILIBRIUM = 0.05
 # - the defrag queue is near empty (to avoid fast successions of defrag when
 #   possible)
 DEVICE_USE_LIMITS = {
-  0.2  => 0.75 * $speed_multiplier,
-  0.5  => 0.6 * $speed_multiplier,
+  0.3  => 0.6 * $speed_multiplier,
   3.0  => 0.5 * $speed_multiplier,
-  11.0 => 0.45 * $speed_multiplier,
   30.0 => 0.4 * $speed_multiplier
 }
 DEVICE_LOAD_WINDOW = DEVICE_USE_LIMITS.keys.max
