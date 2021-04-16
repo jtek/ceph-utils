@@ -279,7 +279,7 @@ module Delaying
   def delay_until(tstamp, min_sleep: 0)
     now = Time.now
     if tstamp <= now
-      delay(min_sleep)
+      delay min_sleep
     else
       sleep [ tstamp - now, min_sleep ].max
     end
@@ -368,7 +368,7 @@ class AsyncSerializer
       end.min
     end
     expire_at = [ next_expiration, max_expire ].compact.min
-    delay_until(expire_at, min_sleep: 0.01)
+    delay_until expire_at
   end
 
   # To call protected by @store_op_mutex
@@ -1155,22 +1155,22 @@ class FilesState
   end
 
   def any_interesting_file?
-    @fragmentation_info_mutex.synchronize {
+    @fragmentation_info_mutex.synchronize do
       TYPES.any? { |t| @file_fragmentations[t].any? }
-    }
+    end
   end
 
   def queued
-    @fragmentation_info_mutex.synchronize {
+    @fragmentation_info_mutex.synchronize do
       @file_fragmentations.values.map(&:size).inject(&:+)
-    }
+    end
   end
 
   def next_defrag_duration
-    @fragmentation_info_mutex.synchronize {
+    @fragmentation_info_mutex.synchronize do
       last_filefrag = @file_fragmentations[next_available_type].last
       last_filefrag ? last_filefrag.defrag_time : nil
-    }
+    end
   end
 
   # Implement a weighted round-robin
@@ -1370,7 +1370,6 @@ class FilesState
   def consolidate_writes
     batch, min_last = @writes_mutex.synchronize do
       # used for each entry
-      # delay = @btrfs.commit_delay
       threshold = Time.now - STOPPED_WRITING_DELAY
       old_threshold = Time.now - MAX_WRITES_DELAY
       # Detect writen files whose fragmentation should be checked
@@ -1728,25 +1727,6 @@ class BtrfsDev
         start_cost: file_frag.fragmentation_cost,
         size: file_frag.size
       }
-    end
-  end
-
-  def loop_over_async_tasks
-    now = Time.now
-    next_perf_queue_at = now
-    next_write_consolidation_at = now + MIN_WRITTEN_FILES_CONSOLIDATION_PERIOD
-    loop do
-      now = Time.now
-      if next_perf_queue_at < now
-        next_perf_queue_at = handle_perf_queue_progress
-        now = Time.now
-      end
-      if next_write_consolidation_at < now
-        @files_state.consolidate_writes
-        next_write_consolidation_at =
-          Time.now + MIN_WRITTEN_FILES_CONSOLIDATION_PERIOD
-      end
-      delay_until [ next_perf_queue_at, next_write_consolidation_at ].min
     end
   end
 
