@@ -918,10 +918,12 @@ class FileFragmentation
     end
 
     def batch_step(files, btrfs)
-      delay_until btrfs.available_for_filefrag_at
+      delay_until btrfs.available_for_filefrag_at(files.size)
       frags = []
-      start = Time.now
+      # Delay start value setting (run_with_device_usage blocks on mutex)
+      start = nil
       btrfs.run_with_device_usage do
+        start = Time.now
         IO.popen([ "filefrag", "-v" ] + files,
                  external_encoding: "BINARY") do |io|
           parser = FilefragParser.new
@@ -1885,8 +1887,8 @@ class BtrfsDev
     @checker.run_with_device_usage(&block)
   end
 
-  def available_for_filefrag_at
-    @checker.available_at
+  def available_for_filefrag_at(filecount)
+    @checker.available_at(expected_time: @average_file_time * filecount)
   end
 
   def scan_status
