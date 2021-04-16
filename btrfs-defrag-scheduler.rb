@@ -1407,7 +1407,15 @@ class FilesState
   def filefrag_loop
     loop do
       list = @to_filefrag.pop
+      # Try to create moderately large batches if we are lagging behind
+      until @to_filefrag.empty? || list.size >= FILEFRAG_ARGCOUNT_MAX
+        list += @to_filefrag.pop
+      end
       update_files(FileFragmentation.batch_init(list, @btrfs))
+      if @to_filefrag.size > 100
+        info "** %s waiting filefrag queue overflow, resetting" % @btrfs.dirname
+        @to_filefrag.clear
+      end
     end
   end
 
