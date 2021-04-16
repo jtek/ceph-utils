@@ -1279,10 +1279,9 @@ class FilesState
     end
   end
 
-  def historize_cost_achievement(file_frag, initial_cost, final_cost, size)
-    key = file_frag.majority_compressed? ? :compressed : :uncompressed
-    history = @cost_achievement_history[key]
-    history << [ initial_cost, final_cost, size, Time.now.to_i ]
+  def historize_cost_achievement(type, initial_cost, final_cost, size)
+    @cost_achievement_history[type] <<
+      [ initial_cost, final_cost, size, Time.now.to_i ]
     serialize_history
   end
 
@@ -1619,7 +1618,7 @@ class BtrfsDev
 
     # Tracking of file defragmentation
     @files_in_defragmentation = {}
-    @perf_queue_mutex = Mutex.new
+    @perf_queue = Queue.new
 
     # Init filefrag time tracking and rate with sensible values
     @average_file_time = 0
@@ -1682,11 +1681,11 @@ class BtrfsDev
       end
     end
     @fragmentation_updater_thread = Thread.new { @files_state.filefrag_loop }
+    @perf_queue_thread = Thread.new { handle_perf_queue_progress }
 
     @files_state.status_at = @slow_status_at = Time.now
     runner = AsyncRunner.new(dirname)
     runner.add_task { @files_state.consolidate_writes }
-    runner.add_task { handle_perf_queue_progress }
     runner.add_task do
       defrag!
       available_for_defrag_at
@@ -1704,7 +1703,7 @@ class BtrfsDev
   def stop_processing
     # This is the right time to store our state
     flush_all
-    [ @slow_scan_thread, @async_thread,
+    [ @slow_scan_thread, @async_thread, @perf_queue_thread,
       @fragmentation_updater_thread ].each do |thread|
       Thread.kill(thread) if thread
     end
@@ -1716,45 +1715,28 @@ class BtrfsDev
 
   # Manage queue of asynchronously defragmented files
   def queue_defragmentation_performance_check(file_frag)
-    # Initially queued_at and last_change must be equal
-    queued_at = Time.now
-    @perf_queue_mutex.synchronize do
-      @files_in_defragmentation[file_frag] = {
-        queued_at: queued_at,
-        start_cost: file_frag.fragmentation_cost,
-        size: file_frag.size
-      }
-    end
+    @perf_queue.push({
+                       file_frag: file_frag,
+                       queued_at: Time.now,
+                       start_cost: file_frag.fragmentation_cost,
+                       size: file_frag.size
+                     })
   end
 
-  # Returns when to be reactivated based on @files_in_defragmentation
   def handle_perf_queue_progress
-    to_remove = []
-    next_queued_at = nil
-    @perf_queue_mutex.synchronize do
-      @files_in_defragmentation.each do |file_frag, value|
-        delay_after_defrag = Time.now - value[:queued_at]
-        # Stop when entries are too recent (Hash is ordered by insertion time)
-        if delay_after_defrag < commit_delay
-          next_queued_at = value[:queued_at]
-          break
-        end
-
-        to_remove << file_frag
-        file_frag.update_fragmentation
-        # Don't consider fragmentation increases
-        new_fragmentation =
+    loop do
+      value = @perf_queue.pop
+      delay_until(value[:queued_at] + commit_delay)
+      file_frag = value[:file_frag]
+      file_frag.update_fragmentation
+      # Don't consider fragmentation increases (might be concurrent writes)
+      new_fragmentation =
           [ value[:start_cost], file_frag.fragmentation_cost ].min
-        @files_state.historize_cost_achievement(file_frag,
-                                                value[:start_cost],
-                                                new_fragmentation,
-                                                value[:size])
-      end
-      to_remove.each { |frag| @files_in_defragmentation.delete(frag) }
+      @files_state.historize_cost_achievement(file_frag.compress_type,
+                                              value[:start_cost],
+                                              new_fragmentation,
+                                              value[:size])
     end
-    return next_queued_at + commit_delay if next_queued_at
-
-    Time.now + DEFAULT_PERF_QUEUE_INTERVAL
   end
 
   def claim_file_write(filename)
