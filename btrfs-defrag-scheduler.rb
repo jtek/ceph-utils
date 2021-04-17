@@ -256,22 +256,28 @@ DEFAULT_COMMIT_DELAY = 30
 DEFRAG_BLACKLIST_FILE = ".no_defrag"
 
 # Synchronize multithreaded outputs
-$output_mutex = Mutex.new
-STDOUT.sync = true
-STDERR.sync = true
+$output_queue = Queue.new
+# STDOUT.sync = true
+# STDERR.sync = true
+
+Thread.new do
+  loop do
+    puts $output_queue.pop
+  end
+end
 
 module Outputs
   def short_tstamp
     Time.now.strftime("%Y%m%d %H%M%S")
   end
   def error(msg)
-    $output_mutex.synchronize { STDERR.puts "#{short_tstamp}: ERROR, #{msg}" }
+    $output_queue.push "#{short_tstamp}: ERROR, #{msg}"
   end
   def info(msg)
-    $output_mutex.synchronize { STDOUT.puts "#{short_tstamp}: #{msg}" }
+    $output_queue.push "#{short_tstamp}: #{msg}"
   end
   def print(msg)
-    $output_mutex.synchronize { STDOUT.print "#{short_tstamp}: #{msg}" }
+    $output_queue.push "#{short_tstamp}: #{msg}"
   end
 end
 
@@ -289,6 +295,19 @@ module Delaying
     return if amount <= 0
 
     sleep amount
+  end
+end
+
+module AlgebraUtils
+  def memory_avg(avg, memory, new_value)
+    (avg * (memory - 1) + new_value) / memory
+  end
+
+  def scaling(value, source_range, destination_range)
+    position = (value - source_range.begin) /
+               (source_range.end - source_range.begin)
+    destination_range.begin +
+      (destination_range.end - destination_range.begin) * position
   end
 end
 
@@ -312,16 +331,13 @@ class AsyncSerializer
   def initialize
     @store_tasks = {}
     @store_content = {}
-    @store_op_mutex = Mutex.new
     @async_writer_thread = Thread.new { store_loop }
+    # Serialization requests are pushed and poped in this queue
+    @serialization_queue = Queue.new
   end
 
   def serialize_entry(file, key, value)
-    now = Time.now
-    @store_content[file][key] = { last_write: now, data: value }
-    @store_tasks[file] ||= {}
-    @store_tasks[file][:first_write] ||= now
-    @store_tasks[file][:last_write] ||= now
+    @serialization_queue.push [ file, key, value, Time.now ]
   end
 
   def unserialize_entry(file, key, op_id, default_value)
@@ -336,42 +352,50 @@ class AsyncSerializer
     puts "= Storing state"
     Thread.kill @async_writer_thread
     # Killing the writer protects against concurrent writes
-    @store_content.keys.each { |file| file_write(file, lock: false) }
+    process_serialization_queue
+    @store_content.keys.each { |file| file_write(file) }
   end
 
   private
 
   def store_loop
     loop do
-      to_store = @store_op_mutex.synchronize do
-        files = @store_tasks.select do |file, tstamps|
-          # If there's only one entry, no use waiting
-          (@store_content[file].count == 1) ||
-            # Use delays to give a chance to others to join
+      process_serialization_queue
+      files = @store_tasks.select do |file, tstamps|
+        # If there's only one entry, no use waiting
+        (@store_content[file].count == 1) ||
+          # otherwise use delays to give a chance to others to join
           tstamps[:last_write] < (Time.now - MIN_COMMIT_DELAY) ||
-            tstamps[:first_write] < (Time.now - MAX_COMMIT_DELAY)
-        end.keys
-        files.each { |file| @store_tasks.delete(file) }
-        files
-      end
-      to_store.each { |file| file_write(file) }
+          tstamps[:first_write] < (Time.now - MAX_COMMIT_DELAY)
+      end.keys
+      files.each { |file| @store_tasks.delete(file) }
+      files.each { |file| file_write(file) }
       delay_until_next_write_check
+    end
+  end
+
+  def process_serialization_queue
+    until @serialization_queue.empty?
+      file, key, value, now = @serialization_queue.pop
+      @store_content[file][key] = { last_write: now, data: value }
+      if @store_tasks[file]
+        @store_tasks[file][:last_write] = now
+      else
+        @store_tasks[file] = { first_write: now, last_write: now }
+      end
     end
   end
 
   def delay_until_next_write_check
     max_expire = Time.now + LOOP_MAX_DELAY
-    next_expiration = @store_op_mutex.synchronize do
-      @store_tasks.values.map do |v|
-        [ v[:last_write] + MIN_COMMIT_DELAY,
-          v[:first_write] + MAX_COMMIT_DELAY ].min
-      end.min
-    end
+    next_expiration = @store_tasks.values.map do |v|
+      [ v[:last_write] + MIN_COMMIT_DELAY,
+        v[:first_write] + MAX_COMMIT_DELAY ].min
+    end.min
     expire_at = [ next_expiration, max_expire ].compact.min
     delay_until expire_at
   end
 
-  # To call protected by @store_op_mutex
   def cleanup_old_keys(file)
     now = Time.now
     # Cleanup old keys
@@ -384,39 +408,28 @@ class AsyncSerializer
 
   def file_load(file)
     now = Time.now
-    @store_op_mutex.synchronize do
-      if File.file?(file)
-        File.open(file, 'r:ascii-8bit') do |f|
-          yaml = f.read
-          @store_content[file] = yaml.empty? ? {} : YAML.load(yaml) rescue {}
-          info "= #{file} loaded"
-        end
-      else
-        @store_content[file] = {}
+    if File.file?(file)
+      File.open(file, 'r:ascii-8bit') do |f|
+        yaml = f.read
+        @store_content[file] = yaml.empty? ? {} : YAML.load(yaml) rescue {}
+        info "= #{file} loaded"
       end
-      # Migrate keys to new format
-      hash = @store_content[file]
-      hash.select do |key, value|
-        unless value[:last_write]
-          hash[key] = { last_write: now, data: value }
-        end
-      end
-      cleanup_old_keys(file)
+    else
+      @store_content[file] = {}
     end
+    # Migrate keys to new format
+    hash = @store_content[file]
+    hash.select do |key, value|
+      unless value[:last_write]
+        hash[key] = { last_write: now, data: value }
+        end
+    end
+    cleanup_old_keys(file)
   end
 
-  def file_write(file, lock: true)
-    # Protect store content against write while dumping unless specified
-    to_store = if lock
-                 @store_op_mutex.synchronize do
-                   cleanup_old_keys(file)
-                   dump(file)
-                 end
-               else
-                 # We don't call cleanup because info uses a mutex
-                 # this is not possible in a trap
-                 dump(file)
-               end
+  def file_write(file)
+    cleanup_old_keys(file)
+    to_store = dump(file)
     FileUtils.mkdir_p(File.dirname(file))
     File.open(file, File::RDWR|File::CREAT|File::BINARY, 0644) do |f|
       f.write(to_store)
@@ -475,28 +488,53 @@ end
 # each task is a block that returns the next tstamp it wants to run at
 # doesn't support running without a task
 class AsyncRunner
+  include Outputs
   include Delaying
+  include AlgebraUtils
+
+  TIMING_MEMORY = 100
 
   def initialize(name)
     @name = name
     @tasks = {}
+    @timings = {}
   end
 
   def run
     loop do
       now = Time.now
-      @tasks.each do |block, run_at|
-        next if run_at > now
+      @tasks.each do |block, params|
+        next if params[:run_at] > now
 
-        @tasks[block] = block.call
+        delay = now - params[:run_at]
+        start = now
+        @tasks[block][:run_at] = block.call
         now = Time.now
+        record_timings(block, delayed: delay, runtime: now - start)
       end
-      delay_until @tasks.values.min
+      delay_until @tasks.values.map { |h| h[:run_at] }.min
     end
   end
 
-  def add_task(time = Time.now, &block)
-    @tasks[block] = time
+  def add_task(name: "", time: Time.now, &block)
+    @tasks[block] = { run_at: time, name: name }
+    @timings[block] = { delayed: 0, runtime: 0 }
+  end
+
+  def dump_timings
+    @timings.each do |block, timings|
+      puts("++ %s, %s: delayed %.2f, runtime %.3f" %
+           [ @name, @tasks[block][:name], @timings[block][:delayed],
+             @timings[block][:runtime] ])
+    end
+  end
+
+  private
+
+  def record_timings(block, delayed:, runtime:)
+    timings = @timings[block]
+    timings[:delayed] = memory_avg(timings[:delayed], TIMING_MEMORY, delayed)
+    timings[:runtime] = memory_avg(timings[:runtime], TIMING_MEMORY, runtime)
   end
 end
 
@@ -510,9 +548,13 @@ class LoadCheck
   LOAD_VALIDITY_PERIOD = 10
 
   def initialize
-    @load_updater_mutex = Mutex.new
-    @next_update = Time.now - 1
-    update_load_if_needed
+    update_load
+    @load_updater_thread = Thread.new do
+      loop do
+        update_load
+        sleep LOAD_VALIDITY_PERIOD
+      end
+    end
   end
 
   # We don't slow down until load_ratio > 1
@@ -522,7 +564,6 @@ class LoadCheck
   end
 
   def load_ratio
-    update_load_if_needed
     # Note: not protected by mutex because Ruby concurrent access semantics
     # don't allow this object to have transient invalid values
     @load_ratio
@@ -530,20 +571,13 @@ class LoadCheck
 
   private
 
-  def update_load_if_needed
-    return if Time.now <= @next_update
-    @load_updater_mutex.synchronize { update_load }
-  end
-
   def update_load
-    # Warning Etc.nprocessors is restricted by CPU affinity
     @load_ratio = cpu_load / target_load
-    @next_update = Time.now + LOAD_VALIDITY_PERIOD
   end
 
+  # Warning Etc.nprocessors is restricted by CPU affinity
   def target_load
-    return $target_load if $target_load
-    Etc.nprocessors
+    $target_load || Etc.nprocessors
   end
 
   def cpu_load
@@ -557,6 +591,7 @@ class UsagePolicyChecker
   def initialize(btrfs)
     @btrfs = btrfs
     @device_uses = []
+    # Used to avoid concurrent IO
     @mutex = Mutex.new
   end
 
@@ -569,7 +604,6 @@ class UsagePolicyChecker
   end
 
   def available_at(expected_time: 0, use_limit_factor: 1)
-    cleanup
     DEVICE_USE_LIMITS.keys.map do |window|
       next_available_for(window, expected_time, use_limit_factor)
     end.max
@@ -602,17 +636,23 @@ class UsagePolicyChecker
     activity / DEVICE_LOAD_WINDOW
   end
 
-  private
-
-  def add_usage(start, stop)
-    @device_uses << [ start, stop ]
-  end
-
   def cleanup
     this_start = Time.now
     # Cleanup the device uses, remove everything ending before used window
-    @device_uses.shift while (first = @device_uses.first) &&
-                             first[1] < (this_start - DEVICE_LOAD_WINDOW)
+    # work on a copy to avoid interfering with concurrent Enumerators
+    new_device_uses = @device_uses.dup
+    new_device_uses.shift while (first = new_device_uses.first) &&
+                                first[1] < (this_start - DEVICE_LOAD_WINDOW)
+    @device_uses = new_device_uses
+  end
+
+  private
+
+  # Note: there is a rare race condition where this can be added to a previous
+  # instance of @device_uses, made obsolete by cleanup, doesn't seem worth a
+  # mutex overhead though
+  def add_usage(start, stop)
+    @device_uses << [ start, stop ]
   end
 
   def next_available_for(window, expected_time, use_limit_factor)
@@ -620,23 +660,27 @@ class UsagePolicyChecker
     use_factor = use_limit_factor / LoadCheck.instance.slowdown_ratio
     target = DEVICE_USE_LIMITS[window] * use_factor
     # When will it reach the target use_ratio ?
-    return now + dichotomy(0..window, target, 0.01) do |wait|
-      use_ratio(now + wait - window, window, expected_time)
+    delay = dichotomy(0..window, target, 0.01) do |wait|
+      use_ratio(now, wait, window, expected_time)
     end
+    now + delay
   end
 
-  # Return ratio without and with expected_time of next task
-  def use_ratio(start, duration, expected_time)
+  # Return expected use ratio when reaching start given known past activity
+  # before start, and "future" activity (based on expected_time) after start
+  def use_ratio(now, wait, window, expected_time)
+    start = now + wait - window
     time_spent = 0
     @device_uses.each do |use_start, use_stop|
       next if use_stop < start
       time_spent += use_stop - [ use_start, start ].max
     end
-    # We don't consider expected_time if there's no device_use
+    # We don't need to consider expected_time if there's no device_use
     return 0 if time_spent == 0
-    # Anything else and we return a normal ratio
-    max_time = [ start + duration - Time.now, expected_time ].min
-    (time_spent + max_time) / duration
+    # Anything else and we return a normal ratio between total expected time
+    # spent in window and window
+    expected_time_in_window = [ window - wait, expected_time ].min
+    (time_spent + expected_time_in_window) / window
   end
 
   # Assumes passed block is a monotonic decreasing function
@@ -921,9 +965,9 @@ class FileFragmentation
       delay_until btrfs.available_for_filefrag_at(files.size)
       frags = []
       # Delay start value setting (run_with_device_usage blocks on mutex)
-      start = nil
+      io_start = nil
       btrfs.run_with_device_usage do
-        start = Time.now
+        io_start = Time.now
         IO.popen([ "filefrag", "-v" ] + files,
                  external_encoding: "BINARY") do |io|
           parser = FilefragParser.new
@@ -936,7 +980,7 @@ class FileFragmentation
           end
         end
       end
-      btrfs.register_filefrag_speed(files.size, Time.now - start)
+      btrfs.register_filefrag_speed(files.size, Time.now - io_start)
       frags
     end
   end
@@ -1321,18 +1365,15 @@ class FilesState
   end
 
   def status
-    last_compressed_cost =
-      @fragmentation_info_mutex.synchronize {
-      @file_fragmentations[:compressed][0] ?
-        "%.2f" % @file_fragmentations[:compressed][0].fragmentation_cost :
-        "none"
-    }
-    last_uncompressed_cost =
-      @fragmentation_info_mutex.synchronize {
-      @file_fragmentations[:uncompressed][0] ?
-        "%.2f" % @file_fragmentations[:uncompressed][0].fragmentation_cost :
-        "none"
-    }
+    last_compressed_cost, last_uncompressed_cost =
+      @fragmentation_info_mutex.synchronize do
+      [ @file_fragmentations[:compressed][0] ?
+          "%.2f" % @file_fragmentations[:compressed][0].fragmentation_cost :
+          "none",
+        @file_fragmentations[:uncompressed][0] ?
+          "%.2f" % @file_fragmentations[:uncompressed][0].fragmentation_cost :
+          "none" ]
+    end
     cleanup_cost_history
     if @cost_achievement_history[:compressed].any?
       info(("# #{@btrfs.dirname} c: %.1f%%; " \
@@ -1412,7 +1453,7 @@ class FilesState
         list += @to_filefrag.pop
       end
       update_files(FileFragmentation.batch_init(list, @btrfs))
-      if @to_filefrag.size > 100
+      if @to_filefrag.size > 1000
         info "** %s waiting filefrag queue overflow, resetting" % @btrfs.dirname
         @to_filefrag.clear
       end
@@ -1613,6 +1654,7 @@ class BtrfsDev
   include HashEntrySerializer
   include HumanFormat
   include Delaying
+  include AlgebraUtils
 
   # create the internal structures, including references to other mountpoints
   def initialize(dir, dev_fs_map)
@@ -1692,29 +1734,45 @@ class BtrfsDev
     @perf_queue_thread = Thread.new { handle_perf_queue_progress }
 
     @files_state.status_at = @slow_status_at = Time.now
-    runner = AsyncRunner.new(dirname)
-    runner.add_task { @files_state.consolidate_writes }
-    runner.add_task do
-      defrag!
-      available_for_defrag_at
-    end
-    runner.add_task { slow_status }
-    runner.add_task { @files_state.status }
-    runner.add_task do
+
+    @runner = AsyncRunner.new(dirname)
+    @runner.add_task(name: "slow scan status") { slow_status }
+    @runner.add_task(name: "status") { @files_state.status }
+    @runner.add_task(name: "fragmentation thresholds") do
       @files_state.compute_thresholds
       Time.now + COST_COMPUTE_DELAY
     end
-    @async_thread = Thread.new { runner.run }
-    @async_thread.priority = 1
+    @runner.add_task(name: "usage policy checker cleanup") do
+      @checker.cleanup
+      Time.now + DEVICE_LOAD_WINDOW
+    end
+    @async_thread = Thread.new { @runner.run }
+
+    @io_runner = AsyncRunner.new(dirname)
+    @io_runner.add_task(name: "defragmenter") do
+      defrag!
+      available_for_defrag_at
+    end
+    @io_runner.add_task(name: "consolidate_writes") do
+      @files_state.consolidate_writes
+    end
+    @io_async_thread = Thread.new { @io_runner.run }
   end
 
   def stop_processing
     # This is the right time to store our state
     flush_all
-    [ @slow_scan_thread, @async_thread, @perf_queue_thread,
+    [ @slow_scan_thread, @async_thread, @io_async_thread, @perf_queue_thread,
       @fragmentation_updater_thread ].each do |thread|
       Thread.kill(thread) if thread
     end
+    @io_runner = nil
+    @runner = nil
+  end
+
+  def dump_timings
+    # compact to handle stopped case
+    [ @io_runner, @runner ].compact.each(&:dump_timings)
   end
 
   def has_dev?(dev_id)
@@ -1884,9 +1942,9 @@ class BtrfsDev
   end
 
   def register_filefrag_speed(count, time)
-    memory = 2 * MAX_FILES_BATCH_SIZE
-    @average_file_time =
-      (@average_file_time * (memory - count) + time)/memory
+    # Divide memory by count as we basically take in count new values
+    memory = (2 * MAX_FILES_BATCH_SIZE).to_f / count
+    @average_file_time = memory_avg(@average_file_time, memory, time / count)
     @rate_controller.set_slow_batch_target
   end
 
@@ -1948,6 +2006,7 @@ class BtrfsDev
     include HumanFormat
     include Outputs
     include Delaying
+    include AlgebraUtils
 
     def initialize(dev:)
       @pass = :none
@@ -2348,15 +2407,13 @@ class BtrfsDev
   def queue_speed_factor
     queue_proportion = @files_state.queue_fill_proportion
     factor = if queue_proportion > QUEUE_PROPORTION_EQUILIBRIUM
-               # linear scale between SLOW_SCAN_MIN_SPEED_FACTOR and 1
-               ((queue_proportion - QUEUE_PROPORTION_EQUILIBRIUM) /
-                (1 - QUEUE_PROPORTION_EQUILIBRIUM) *
-                (SLOW_SCAN_MIN_SPEED_FACTOR - 1)) + 1
+               # linear scale between 1 and SLOW_SCAN_MIN_SPEED_FACTOR
+               scaling(queue_proportion, QUEUE_PROPORTION_EQUILIBRIUM..1,
+                       1..SLOW_SCAN_MIN_SPEED_FACTOR)
              else
                # linear scale between 1 and SLOW_SCAN_MAX_SPEED_FACTOR
-               SLOW_SCAN_MAX_SPEED_FACTOR +
-                 (queue_proportion / QUEUE_PROPORTION_EQUILIBRIUM *
-                  (1 - SLOW_SCAN_MAX_SPEED_FACTOR))
+               scaling(queue_proportion, 0..QUEUE_PROPORTION_EQUILIBRIUM,
+                       SLOW_SCAN_MAX_SPEED_FACTOR..1)
              end
     factor / LoadCheck.instance.slowdown_ratio
   end
@@ -2505,6 +2562,10 @@ class BtrfsDevs
 
   def flush_and_stop_all
     @btrfs_devs.each(&:stop_processing)
+  end
+
+  def dump_timings
+    @btrfs_devs.each(&:dump_timings)
   end
 
   def fatrace_file_writes
@@ -2701,12 +2762,18 @@ class Main
     AsyncSerializer.instance.stop_and_flush_all
     exit
   end
+
+  def dump_timings
+    @devs.dump_timings
+  end
 end
 
 @main = Main.new
 
-interrupt_handler = proc { @main.flush_all_exit }
-Signal.trap("INT", interrupt_handler)
-Signal.trap("TERM", interrupt_handler)
+exit_interrupt_handler = proc { @main.flush_all_exit }
+timings_interrupt_handler = proc { @main.dump_timings }
+Signal.trap("INT", exit_interrupt_handler)
+Signal.trap("TERM", exit_interrupt_handler)
+Signal.trap("USR1", timings_interrupt_handler)
 
 @main.run
