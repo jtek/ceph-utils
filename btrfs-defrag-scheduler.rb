@@ -9,6 +9,8 @@ require 'pathname'
 require 'yaml'
 require 'fileutils'
 require 'singleton'
+require 'logger'
+require 'etc'
 
 def help_exit
   script_name = File.basename($0)
@@ -255,29 +257,18 @@ DEFAULT_COMMIT_DELAY = 30
 # Per filesystem defrag blacklist
 DEFRAG_BLACKLIST_FILE = ".no_defrag"
 
-# Synchronize multithreaded outputs
-$output_queue = Queue.new
-# STDOUT.sync = true
-# STDERR.sync = true
-
-Thread.new do
-  loop do
-    puts $output_queue.pop
-  end
+$logger = Logger.new(STDOUT)
+$logger.formatter = proc do |severity, datetime, progname, msg|
+  "%s: %s\n" % [ datetime.strftime("%Y%m%d %H%M%S"), msg ]
 end
+$logger.level = :info
 
 module Outputs
-  def short_tstamp
-    Time.now.strftime("%Y%m%d %H%M%S")
-  end
   def error(msg)
-    $output_queue.push "#{short_tstamp}: ERROR, #{msg}"
+    $logger.error msg
   end
   def info(msg)
-    $output_queue.push "#{short_tstamp}: #{msg}"
-  end
-  def print(msg)
-    $output_queue.push "#{short_tstamp}: #{msg}"
+    $logger.info msg
   end
 end
 
