@@ -532,7 +532,6 @@ end
 # Thread-safe load checker (won't check load more than once per period
 # accross all threads)
 class LoadCheck
-  require 'etc'
   include Singleton
 
   # 10 seconds seems small enough to detect changes with real-life impacts
@@ -772,20 +771,6 @@ class FilefragParser
   def add_line(line)
     @buffer << line
     case line
-    when /^Filesystem type is:/n,
-         /^ ext:     logical_offset:        physical_offset: length:   expected: flags:/n
-      # Headers, ignored
-    when /^File size of (.+) is (\d+) /n
-      @filesize = Regexp.last_match(2).to_i
-      @filename = Regexp.last_match(1)
-    when /^(.+): \d+ extents? found$/n
-      if @filename != Regexp.last_match(1)
-        error("Couldn't understand this part:\n" +
-              @buffer.join("\n") +
-              "\n** #{@filename} ** !=\n** #{Regexp.last_match(1)} **")
-      else
-        @eof = true
-      end
     when /^\s*\d+:\s*\d+\.\.\s*\d+:\s*(\d+)\.\.\s*(\d+):\s*(\d+):\s*(\d+):\s?(\S*)$/n
       # Example of such a line:
       #    1:      960..    1023:  193214976.. 193215039:     64:  193217920: last,eof
@@ -799,6 +784,11 @@ class FilefragParser
       else
         @uncompressed_blocks += length
       end
+    # Special case of next one to handle separately
+    when /^\s*\d+:\s*\d+\.\.\s*\d+:\s*0\.\.\s*0:\s*0:\s*last,unknown_loc,delalloc,eof$/n
+    # Example of such a line:
+    # 2:        2..      25:          0..         0:      0:             last,unknown_loc,delalloc,eof
+      # Nothing to do, extent being delalloced, maybe on file truncate
     when /^\s*\d+:\s*\d+\.\.\s*\d+:\s*(\d+)\.\.\s*(\d+):\s*(\d+):\s*(\S*)$/n
       # Either first line or continuation of previous extent
       unless @total_seek_time == 0 ||
@@ -812,6 +802,21 @@ class FilefragParser
         @compressed_blocks += length
       else
         @uncompressed_blocks += length
+      end
+    # These only match once per output, so test them later
+    when /^Filesystem type is:/n,
+         /^ ext:     logical_offset:        physical_offset: length:   expected: flags:/n
+      # Headers, ignored
+    when /^File size of (.+) is (\d+) /n
+      @filesize = Regexp.last_match(2).to_i
+      @filename = Regexp.last_match(1)
+    when /^(.+): \d+ extents? found$/n
+      if @filename != Regexp.last_match(1)
+        error("Couldn't understand this part:\n" +
+              @buffer.join("\n") +
+              "\n** #{@filename} ** !=\n** #{Regexp.last_match(1)} **")
+      else
+        @eof = true
       end
     else
       error("** unknown line **\n" + buffer_dump)
