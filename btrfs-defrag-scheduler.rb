@@ -966,7 +966,8 @@ class FileFragmentation
 
       # Delay start value setting (run_with_device_usage blocks on mutex)
       io_start = nil
-      frags = btrfs.run_with_device_usage do
+      frags = []
+      btrfs.run_with_device_usage do
         io_start = Time.now
         IO.popen([ "filefrag", "-v" ] + files,
                  external_encoding: "BINARY") do |io|
