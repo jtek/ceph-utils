@@ -1781,12 +1781,10 @@ class BtrfsDev
 
   # Manage queue of asynchronously defragmented files
   def queue_defragmentation_performance_check(file_frag)
-    @perf_queue.push({
-                       file_frag: file_frag,
+    @perf_queue.push({ file_frag: file_frag,
                        queued_at: Time.now,
                        start_cost: file_frag.fragmentation_cost,
-                       size: file_frag.size
-                     })
+                       size: file_frag.size })
   end
 
   def handle_perf_queue_progress
@@ -1802,6 +1800,10 @@ class BtrfsDev
                                               value[:start_cost],
                                               new_fragmentation,
                                               value[:size])
+      next unless @perf_queue.size > 10000
+
+      info "** %s perf queue overflow, resetting" % @dirname
+      @perf_queue.clear
     end
   end
 
