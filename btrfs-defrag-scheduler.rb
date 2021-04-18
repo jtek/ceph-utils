@@ -529,8 +529,9 @@ class AsyncRunner
   end
 end
 
-# Thread-safe load checker (won't check load more than once per period
-# accross all threads)
+# Common source for fresh load checking, avoid wasting time in all threads
+# finding out if the load is fresh on each access and reloading it when needing
+# this makes periodic updates in a dedicated thread
 class LoadCheck
   include Singleton
 
