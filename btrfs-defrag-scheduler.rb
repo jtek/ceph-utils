@@ -261,7 +261,7 @@ $logger = Logger.new(STDOUT)
 $logger.formatter = proc do |severity, datetime, progname, msg|
   "%s: %s\n" % [ datetime.strftime("%Y%m%d %H%M%S"), msg ]
 end
-$logger.level = :info
+$logger.level = Logger::INFO
 
 module Outputs
   def error(msg)
