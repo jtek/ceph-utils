@@ -1278,7 +1278,7 @@ class FilesState
 
   # This adds or updates work to do based on fragmentations
   # returns the number of new files put in queue
-  def update_files(file_fragmentations)
+  def select_for_defragmentation(file_fragmentations)
     return 0 unless file_fragmentations.any?
 
     # Use a set for faster include?
@@ -1414,8 +1414,8 @@ class FilesState
         (value.last < threshold) || (value.first < old_threshold)
       end.keys
 
-      # Remove them from @written_files before update_files as it filters
-      # according to its content
+      # Remove them from @written_files before select_for_defragmentation as
+      # it filters according to its content
       candidates.each { |shortname| @written_files.delete(shortname) }
 
       # Cleanup written_files if it overflows, moving files to the
@@ -1452,11 +1452,11 @@ class FilesState
       until @to_filefrag.empty? || list.size >= FILEFRAG_ARGCOUNT_MAX
         list += @to_filefrag.pop
       end
-      update_files(FileFragmentation.batch_init(list, @btrfs))
-      if @to_filefrag.size > 1000
-        info "** %s waiting filefrag queue overflow, resetting" % @btrfs.dirname
-        @to_filefrag.clear
-      end
+      select_for_defragmentation(FileFragmentation.batch_init(list, @btrfs))
+      next unless @to_filefrag.size > 1000
+
+      info "** %s waiting filefrag queue overflow, resetting" % @btrfs.dirname
+      @to_filefrag.clear
     end
   end
 
@@ -2399,7 +2399,7 @@ class BtrfsDev
   def queue_slow_scan_batch
     # Note: this tracks filefrag speed and adjust batch size/period
     frags = FileFragmentation.batch_init(@batch.filelist, self)
-    @queued += @files_state.update_files(frags)
+    @queued += @files_state.select_for_defragmentation(frags)
   end
 
   # Adjust filefrag call speed based on amount of queued files
