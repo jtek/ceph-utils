@@ -1166,17 +1166,18 @@ class FilesState
 
   def initialize(btrfs)
     @btrfs = btrfs
-    # Queue of files to defragment, ordered by fragmentation cost
-    @file_fragmentations = {
-      compressed: [],
-      uncompressed: [],
-    }
+
+    @fragmentation_info_mutex = Mutex.new
+    # Queue of FileFragmentation to defragment, ordered by fragmentation cost
+    @file_fragmentations = { compressed: [], uncompressed: [] }
+    # The same, by their shortname in hashes
+    @to_defrag_hashes = { compressed: Hash.new, uncompressed: Hash.new }
+
     @last_queue_overflow_at = nil
     @fetch_accumulator = {
       compressed: 0.5,
       uncompressed: 0.5,
     }
-    @fragmentation_info_mutex = Mutex.new
     @type_tracker = {
       compressed: 1.0,
       uncompressed: 1.0,
@@ -1228,7 +1229,9 @@ class FilesState
       current_type = next_available_type
       @fetch_accumulator[current_type] = @fetch_accumulator[current_type] % 1.0
       TYPES.each { |type| @fetch_accumulator[type] += type_share(type) }
-      @file_fragmentations[current_type].pop
+      frag = @file_fragmentations[current_type].pop
+      @to_defrag_hashes[current_type].delete(frag.short_filename)
+      frag
     end
   end
 
@@ -1279,35 +1282,58 @@ class FilesState
 
   # This adds or updates work to do based on fragmentations
   # returns the number of new files put in queue
+  # This can be called relatively often (multiple times per second per fs),
+  # handles multi-thousands item lists and locks a mutex for its duration:
+  # some care went into making this fast
   def select_for_defragmentation(file_fragmentations)
-    return 0 unless file_fragmentations.any?
-
-    # Use a set for faster include?
-    updated_names = file_fragmentations.map(&:short_filename).to_set
-    # Remove files we won't consider anyway
-    file_fragmentations.reject! { |frag| below_threshold_cost(frag) }
-    duplicates = 0
+    added = 0
+    to_delete_frags = Hash[ TYPES.map { |type| [ type, [] ] } ]
+    to_add_frags = Hash[ TYPES.map { |type| [ type, [] ] } ]
     @fragmentation_info_mutex.synchronize do
-      # Remove duplicates (will be put in queue again if still above threshold)
-      TYPES.each do |type|
-        @file_fragmentations[type].reject! do |frag|
-          if updated_names.include?(frag.short_filename)
-            duplicates += 1
-            true
+      # Process latest frags first (to allow ignoring older duplicates)
+      file_fragmentations.reverse_each do |frag|
+        shortname = frag.short_filename
+        new_type = frag.compress_type
+        old_type = known_file_frag_type(shortname)
+
+        unless below_threshold_cost(frag)
+          # Don't add the same file twice to the same type as it would create
+          # a memory leak, the consequence is only negligible inefficiency if
+          # added to multiple types (conditions hard to meet too)
+          already_added = to_add_frags[new_type].any? do |frag|
+            frag.short_filename == shortname
           end
+          next if already_added
+
+          added += 1 unless old_type
+          to_add_frags[new_type] << frag
+        end
+        next unless old_type
+
+        to_delete_frags[old_type] <<
+          @to_defrag_hashes[old_type].delete(shortname)
+      end
+      to_delete_frags.each do |type, list|
+        next if list.empty? # Common case, avoids reallocating instance var
+
+        @file_fragmentations[type] -= list
+      end
+      to_add_frags.each do |type, list|
+        @file_fragmentations[type].concat(list)
+        list.each do |frag|
+          @to_defrag_hashes[type][frag.short_filename] = frag
         end
       end
-      # Insert new versions and new files
-      file_fragmentations.each do |f|
-        @file_fragmentations[f.compress_type] << f
-      end
+      # No need to sort or trim if we only deleted entries
+      # This is the common case when walking an already processed fs
+      break if added == 0
+
       # Keep the order to easily fetch the worst fragmented ones
-      sort_files
+      sort_frags
       # Remove old entries and fit in max queue length
-      cleanup_files
+      trim_frags
     end
-    # Return number of queued items, ignoring duplicates
-    file_fragmentations.size - duplicates
+    added
   end
 
   def file_written_to(filename)
@@ -1599,34 +1625,37 @@ class FilesState
     @last_recent_serialized_at = Time.now
   end
 
-  def sort_files
+  def sort_frags
     TYPES.each { |t| @file_fragmentations[t].sort_by!(&:fragmentation_cost) }
   end
+
   # Must be called protected by @fragmentation_info_mutex and after sorting
-  def cleanup_files
-    if total_queue_size > MAX_QUEUE_LENGTH
-      @last_queue_overflow_at = Time.now
-      compressed_target_size = queue_reserve(:compressed)
-      uncompressed_target_size = queue_reserve(:uncompressed)
-      if queue_size(:compressed) < compressed_target_size
-        # uncompressed has this size available
-        uncompressed_target_size = MAX_QUEUE_LENGTH - queue_size(:compressed)
-      end
-      if queue_size(:uncompressed) < uncompressed_target_size
-        # compressed has this size available
-        compressed_target_size = MAX_QUEUE_LENGTH - queue_size(:uncompressed)
-      end
-      if queue_size(:compressed) > compressed_target_size
-        start = queue_size(:compressed) - compressed_target_size
-        @file_fragmentations[:compressed] =
-          @file_fragmentations[:compressed][start..-1]
-      end
-      if queue_size(:uncompressed) > uncompressed_target_size
-        start = queue_size(:uncompressed) - uncompressed_target_size
-        @file_fragmentations[:uncompressed] =
-          @file_fragmentations[:uncompressed][start..-1]
-      end
+  def trim_frags
+    return unless total_queue_size > MAX_QUEUE_LENGTH
+
+    @last_queue_overflow_at = Time.now
+    compressed_target_size = queue_reserve(:compressed)
+    uncompressed_target_size = queue_reserve(:uncompressed)
+    if queue_size(:compressed) < compressed_target_size
+      # uncompressed has this size available
+      uncompressed_target_size = MAX_QUEUE_LENGTH - queue_size(:compressed)
     end
+    if queue_size(:uncompressed) < uncompressed_target_size
+      # compressed has this size available
+      compressed_target_size = MAX_QUEUE_LENGTH - queue_size(:uncompressed)
+    end
+    trim_type_to(:compressed, compressed_target_size)
+    trim_type_to(:uncompressed, uncompressed_target_size)
+  end
+  def trim_type_to(type, target)
+    current_size = queue_size(type)
+    return unless current_size > target
+
+    start = current_size - target
+    @file_fragmentations[type][0...start]..each do |frag|
+      @to_defrag_hashes[type].delete(frag.short_filename)
+    end
+    @file_fragmentations[type] = @file_fragmentations[type][start..-1]
   end
   def queue_size(type)
     @file_fragmentations[type].size
@@ -1643,6 +1672,12 @@ class FilesState
     else
       @cost_thresholds[:uncompressed]
     end
+  end
+  def known_file_frag_type(shortname)
+    @to_defrag_hashes.each do |type, hash|
+      return type if hash.key?(shortname)
+    end
+    nil
   end
 end
 
