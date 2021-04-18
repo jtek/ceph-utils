@@ -960,10 +960,13 @@ class FileFragmentation
 
     def batch_step(files, btrfs)
       delay_until btrfs.available_for_filefrag_at(files.size)
-      frags = []
+      # Filter at the last possible moment to avoid too many open errors in log
+      files.reject! { |file| !File.file?(file) }
+      return [] unless files.any?
+
       # Delay start value setting (run_with_device_usage blocks on mutex)
       io_start = nil
-      btrfs.run_with_device_usage do
+      frags = btrfs.run_with_device_usage do
         io_start = Time.now
         IO.popen([ "filefrag", "-v" ] + files,
                  external_encoding: "BINARY") do |io|
