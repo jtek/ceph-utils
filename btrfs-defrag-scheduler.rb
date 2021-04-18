@@ -1367,12 +1367,12 @@ class FilesState
 
   def status
     last_compressed_cost, last_uncompressed_cost =
-      @fragmentation_info_mutex.synchronize do
-      [ @file_fragmentations[:compressed][0] ?
-          "%.2f" % @file_fragmentations[:compressed][0].fragmentation_cost :
+    @fragmentation_info_mutex.synchronize do
+      first_compressed = @file_fragmentations[:compressed][0]
+      first_uncompressed = @file_fragmentations[:uncompressed][0]
+      [ first_compressed ? "%.2f" % first_compressed.fragmentation_cost :
           "none",
-        @file_fragmentations[:uncompressed][0] ?
-          "%.2f" % @file_fragmentations[:uncompressed][0].fragmentation_cost :
+        first_uncompressed ? "%.2f" % first_uncompressed.fragmentation_cost :
           "none" ]
     end
     cleanup_cost_history
