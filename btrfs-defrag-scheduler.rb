@@ -953,7 +953,7 @@ class FileFragmentation
   class << self
     include Delaying
 
-    def create(filelist, btrfs)
+    def create(filelist, btrfs, cached:)
       frags = []
       until filelist.empty?
         files = []
@@ -963,14 +963,15 @@ class FileFragmentation
           length += file.size + 1
           files << file
         end
-        frags += batch_step(files, btrfs)
+        frags += batch_step(files, btrfs, cached: cached)
       end
       btrfs.track_compress_type(frags.map(&:compress_type)) if frags.any?
       frags
     end
 
-    def batch_step(files, btrfs)
-      delay_until btrfs.available_for_filefrag_at(files.size)
+    def batch_step(files, btrfs, cached:)
+      delay_until btrfs.available_for_filefrag_at(files.size,
+                                                  cached: cached)
       # Filter at the last possible moment to avoid too many open errors in log
       files.reject! { |file| !File.file?(file) }
       return [] unless files.any?
@@ -992,7 +993,9 @@ class FileFragmentation
           end
         end
       end
-      btrfs.register_filefrag_speed(files.size, Time.now - io_start)
+      btrfs.register_filefrag_speed(count: files.size,
+                                    time: Time.now - io_start,
+                                    cached: cached)
       frags
     end
   end
@@ -1487,7 +1490,8 @@ class FilesState
       list = @to_filefrag.pop
       # But we want to process everything
       list += @to_filefrag.pop until @to_filefrag.empty?
-      select_for_defragmentation(FileFragmentation.create(list, @btrfs))
+      select_for_defragmentation(FileFragmentation.create(list, @btrfs,
+                                                          cached: true))
 
       skipped = 0
       while @to_filefrag.size > MAX_FILEFRAG_QUEUE_SIZE
@@ -1720,8 +1724,12 @@ class BtrfsDev
     @perf_queue = Queue.new
 
     # Init filefrag time tracking and rate with sensible values
-    @average_file_time = 0
+    @average_file_time = { cached: 0, not_cached: 0 }
     detect_options(dev_fs_map)
+  end
+
+  def average_file_time(cached:)
+    @average_file_time[cached_key(cached)]
   end
 
   def detect_options(dev_fs_map)
@@ -1984,8 +1992,9 @@ class BtrfsDev
     @checker.run_with_device_usage(&block)
   end
 
-  def available_for_filefrag_at(filecount)
-    @checker.available_at(expected_time: @average_file_time * filecount)
+  def available_for_filefrag_at(filecount, cached:)
+    @checker.available_at(expected_time:
+                            average_file_time(cached: cached) * filecount)
   end
 
   def scan_status
@@ -1995,11 +2004,13 @@ class BtrfsDev
         @rate_controller.scan_speed_rate(considered: @considered) ]
   end
 
-  def register_filefrag_speed(count, time)
+  def register_filefrag_speed(count:, time:, cached:)
     # Divide memory by count as we basically take in count new values
     memory = (2 * MAX_FILES_BATCH_SIZE).to_f / count
-    @average_file_time = memory_avg(@average_file_time, memory, time / count)
-    @rate_controller.set_slow_batch_target
+    key = cached_key(cached)
+    @average_file_time[key] =
+      memory_avg(@average_file_time[key], memory, time / count)
+    @rate_controller.set_slow_batch_target unless cached
   end
 
   # accelerate/slowdown based on queue length and IO load
@@ -2008,6 +2019,10 @@ class BtrfsDev
   end
 
   private
+
+  def cached_key(cached)
+    cached ? :cached : :not_cached
+  end
 
   # This class handles batch processing, it expects
   # an initial batch size, and a block to call when the batch is ready
@@ -2452,7 +2467,7 @@ class BtrfsDev
 
   def queue_slow_scan_batch
     # Note: this tracks filefrag speed and adjust batch size/period
-    frags = FileFragmentation.create(@batch.filelist, self)
+    frags = FileFragmentation.create(@batch.filelist, self, cached: false)
     @queued += @files_state.select_for_defragmentation(frags)
   end
 
@@ -2473,7 +2488,7 @@ class BtrfsDev
   end
 
   def average_batch_time
-    @average_file_time * @rate_controller.slow_batch_size
+    @average_file_time[:not_cached] * @rate_controller.slow_batch_size
   end
 
   def slow_status
