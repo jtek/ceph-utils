@@ -2621,7 +2621,7 @@ class BtrfsDevs
 
   def fatrace_file_writes
     cmd = [ "fatrace", "-f", "W" ]
-    extract_write_re = /^[^(]+\([0-9]+\): [ORWC]+ (.*)$/
+    extract_write_re = /\A[^(]+\([0-9]+\): [ORWC]+ (.*)\Z/
     loop do
       failed = false
       info("= Starting global fatrace thread")
@@ -2632,9 +2632,8 @@ class BtrfsDevs
             while line = io.gets do
               # Skip btrfs commands (defrag mostly)
               next if line.start_with?("btrfs(")
-              if match = line.match(extract_write_re)
-                file = match[1]
-                handle_file_write(file)
+              if extract_write_re =~ line
+                handle_file_write($1)
               else
                 error "Can't extract file from '#{line}'"
               end
