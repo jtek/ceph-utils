@@ -242,7 +242,10 @@ FATRACE_TTL = 24 * 3600 # every day
 
 # System dependent (reserve 100 for cmd and 4096 for one path entry)
 FILEFRAG_ARG_MAX = 131072 - 100 - 4096
-FILEFRAG_ARGCOUNT_MAX = 25
+
+# Overflow handling
+MAX_FILEFRAG_QUEUE_SIZE = 100
+MAX_PERF_QUEUE_SIZE = 100
 
 # Where do we serialize our data
 STORE_DIR        = "/root/.btrfs_defrag"
@@ -947,11 +950,16 @@ class FileFragmentation
   class << self
     include Delaying
 
-    def batch_init(filelist, btrfs)
+    def create(filelist, btrfs)
       frags = []
       until filelist.empty?
-        files = filelist[0...FILEFRAG_ARGCOUNT_MAX]
-        filelist = filelist[FILEFRAG_ARGCOUNT_MAX..-1] || []
+        files = []
+        length = 0
+        while filelist.any? && length < FILEFRAG_ARG_MAX
+          file = filelist.pop
+          length += file.size + 1
+          files << file
+        end
         frags += batch_step(files, btrfs)
       end
       btrfs.track_compress_type(frags.map(&:compress_type)) if frags.any?
@@ -1441,8 +1449,6 @@ class FilesState
         (value.last < threshold) || (value.first < old_threshold)
       end.keys
 
-      # Remove them from @written_files before select_for_defragmentation as
-      # it filters according to its content
       candidates.each { |shortname| @written_files.delete(shortname) }
 
       # Cleanup written_files if it overflows, moving files to the
@@ -1474,16 +1480,20 @@ class FilesState
 
   def filefrag_loop
     loop do
+      # This one is there to block waiting for input without wasting resources
       list = @to_filefrag.pop
-      # Try to create moderately large batches if we are lagging behind
-      until @to_filefrag.empty? || list.size >= FILEFRAG_ARGCOUNT_MAX
-        list += @to_filefrag.pop
-      end
-      select_for_defragmentation(FileFragmentation.batch_init(list, @btrfs))
-      next unless @to_filefrag.size > 1000
+      # But we want to process everything
+      list += @to_filefrag.pop until @to_filefrag.empty?
+      select_for_defragmentation(FileFragmentation.create(list, @btrfs))
 
-      info "** %s waiting filefrag queue overflow, resetting" % @btrfs.dirname
-      @to_filefrag.clear
+      skipped = 0
+      while @to_filefrag.size > MAX_FILEFRAG_QUEUE_SIZE
+        # Ignore oldests
+        @to_filefrag.pop
+        skipped += 1
+      end
+      info("** %s: waiting_filefrag queue overflow, skipping %d" %
+           [ @btrfs.dirname, skipped ]) if skipped > 0
     end
   end
 
@@ -1836,10 +1846,13 @@ class BtrfsDev
                                               value[:start_cost],
                                               new_fragmentation,
                                               value[:size])
-      next unless @perf_queue.size > 10000
-
-      info "** %s perf queue overflow, resetting" % @dirname
-      @perf_queue.clear
+      skipped = 0
+      while @perf_queue.size > MAX_PERF_QUEUE_SIZE
+        @perf_queue.pop
+        skipped += 1
+      end
+      info("** %s: perf queue overflow, skipping %d" %
+           [ @dirname, skipped ]) if skipped > 0
     end
   end
 
@@ -2436,7 +2449,7 @@ class BtrfsDev
 
   def queue_slow_scan_batch
     # Note: this tracks filefrag speed and adjust batch size/period
-    frags = FileFragmentation.batch_init(@batch.filelist, self)
+    frags = FileFragmentation.create(@batch.filelist, self)
     @queued += @files_state.select_for_defragmentation(frags)
   end
 
