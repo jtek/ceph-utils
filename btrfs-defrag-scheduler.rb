@@ -2010,6 +2010,8 @@ class BtrfsDev
     key = cached_key(cached)
     @average_file_time[key] =
       memory_avg(@average_file_time[key], memory, time / count)
+    # Only batch from slow scan aren't cached and will need/be useful to update
+    # the batch target
     @rate_controller.set_slow_batch_target unless cached
   end
 
