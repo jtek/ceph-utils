@@ -12,6 +12,14 @@ require 'singleton'
 require 'logger'
 require 'etc'
 
+$defaults = {
+  extent_size: '32M',
+  threshold: 1.05,
+  speed_multiplier: 1.0,
+  slow_start: 600,
+  drive_count: 1
+}
+
 def help_exit
   script_name = File.basename($0)
   print <<EOMSG
@@ -29,36 +37,41 @@ Recognized options:
 
 --target-extent-size <value> (-e)
     value passed to btrfs filesystem defrag "-t" parameter
-    default: 32M
+    default: #{$defaults[:extent_size]}
 
---trees (-f)
-     fully defragment the read/write subvolume by launching an extent
-     and subvolume trees defragment after each full scan
-     WARNING: IO performance on HDD suffers greatly on large filesystems
-     default: disabled
+--threshold <value> (-w)
+    minimum fragmentation cost needed to trigger defragmentation
+    cost: ratio of estimated read speed in fragmented state vs speed when
+          stored in one continuous zone
+    default: #{$defaults[:threshold]}
 
 --verbose (-v)
-    prints defragmention as it happens
+    display information about defragmentations
 
 --debug (-d)
-    prints internal processes information
+    display internal processes information
 
 --speed-multiplier <value> (-m)
     slows down (<1.0) or speeds up (>1.0) the defragmentation process
-    the process try to avoid monopolizing the I/O bandwidth,
-    don't increase this unless you have to correct the default behaviour
-    default: 1.0
+    the process try to avoid monopolizing the I/O bandwidth limiting
+    time waiting for IO to ~40%, increasing to 2.5 doesn't put any limit
+    to IO wait.
+    - decrease this if you see IO latency/bandwidth problems
+    - increase this if the scheduler can't keep up and displays overflows
+    default: #{$defaults[:speed_multiplier]}
 
 --slow-start <value> (-l)
-    wait for <value> seconds before scanning the filesystems,
+    wait for <value> seconds before scanning the filesystems.
+    The initial catch-up to find the point where the last scan aborted is IO
+    intensive. This gives time to other processes to warm up the disk cache.
     files modified/created are still processed during this period
-    default: 600
+    default: #{$defaults[:slow_start]}
 
 --drive-count <value> (-c)
     number of 7200rpm drives used by the filesystem
     this changes the cost of seeking when computing fragmentation costs
     more drives: less cost
-    default: 1
+    default: #{$defaults[:drive_count]}
 
 --ignore-load (-i)
     WARNING: this can and will reduce your FS performance during heavy I/O
@@ -71,6 +84,12 @@ Recognized options:
     load to use as a threshold for reducing defragmentation activity
     use if the default load target isn't ideal
     default: number of CPUs detected
+
+--trees (-f)
+     fully defragment the read/write subvolume by launching an extent
+     and subvolume trees defragment after each full scan
+     WARNING: IO performance on HDD can suffer greatly on large filesystems
+     default: disabled
 EOMSG
   exit
 end
@@ -81,6 +100,7 @@ opts =
                  [ '--debug', '-d', GetoptLong::NO_ARGUMENT ],
                  [ '--ignore-load', '-i', GetoptLong::NO_ARGUMENT ],
                  [ '--full-scan-time', '-s', GetoptLong::REQUIRED_ARGUMENT ],
+                 [ '--threshold', '-w', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--trees', '-f', GetoptLong::NO_ARGUMENT ],
                  [ '--target-extent-size', '-e',
                    GetoptLong::REQUIRED_ARGUMENT ],
@@ -90,15 +110,15 @@ opts =
                  [ '--target-load', '-t', GetoptLong::REQUIRED_ARGUMENT ])
 
 # Latest recommendation from BTRFS developpers as of 2016
-$default_extent_size = '32M'
 $defragment_trees = false
 $verbose = false
 $debug = false
 $ignore_load = false
 $target_load = nil
-$speed_multiplier = 1.0
-$drive_count = 1
-slow_start = 600
+$drive_count = $defaults[:drive_count]
+speed_multiplier = $defaults[:speed_multiplier]
+fragmentation_threshold = $defaults[:threshold]
+slow_start = $defaults[:slow_start]
 scan_time = nil
 opts.each do |opt,arg|
   case opt
@@ -111,13 +131,18 @@ opts.each do |opt,arg|
   when '--full-scan-time'
     scan_time = arg.to_f
     help_exit if scan_time < 0.05
+  when '--threshold'
+    threshold = arg.to_f
+    next if threshold < 1
+    fragmentation_threshold = threshold
   when '--trees'
     $defragment_trees = true
   when '--target-extent-size'
-    $default_extent_size = arg
+    $extent_size = arg
   when '--speed-multiplier'
-    $speed_multiplier = arg.to_f
-    $speed_multiplier = 1.0 if $speed_multiplier <= 0
+    multiplier = arg.to_f
+    next if multiplier <= 0
+    speed_multiplier = multiplier
   when '--slow-start'
     slow_start = arg.to_i
     slow_start = 600 if slow_start < 0
@@ -130,7 +155,7 @@ opts.each do |opt,arg|
     $target_load = arg.to_f
   end
 end
-
+$extent_size ||= $defaults[:extent_size]
 
 # This defragments Btrfs filesystem files
 # the whole FS is scanned over SLOW_SCAN_PERIOD
@@ -147,7 +172,7 @@ COST_HISTORY_TTL = 7200
 # defragment them as soon as they begin to fragment themselves or you will have
 # to defragment them very often, generating I/O load that would defeat the
 # purpose of defragmenting (keeping latencies low)
-MIN_FRAGMENTATION_THRESHOLD = 1.05
+MIN_FRAGMENTATION_THRESHOLD = fragmentation_threshold
 # Some files can't be defragmented below 1.05, especially when BTRFS uses
 # compression
 # So we track the level of fragmentation obtained after defragmenting to detect
@@ -176,9 +201,9 @@ QUEUE_PROPORTION_EQUILIBRIUM = 0.05
 # - the defrag queue is near empty (to avoid fast successions of defrag when
 #   possible)
 DEVICE_USE_LIMITS = {
-  0.3  => 0.6 * $speed_multiplier,
-  3.0  => 0.5 * $speed_multiplier,
-  30.0 => 0.4 * $speed_multiplier
+  0.3  => 0.6 * speed_multiplier,
+  3.0  => 0.5 * speed_multiplier,
+  30.0 => 0.4 * speed_multiplier
 }
 DEVICE_LOAD_WINDOW = DEVICE_USE_LIMITS.keys.max
 EXPECTED_COMPRESS_RATIO = 0.5
@@ -204,18 +229,20 @@ SLOW_SCAN_CATCHUP_WAIT = slow_start
 # this will be repeated until reaching max speed SLOW_SCAN_PERIOD / 2 after
 # the initial period
 SLOW_SCAN_SPEED_INCREASE_STEP = 1.1
+# If a scan stops early, delay the next one at most this
+MAX_DELAY_BETWEEN_SLOW_SCANS = 120
 
 # These are used to compensate for deviation of the slow scan progress
 SLOW_SCAN_MAX_SPEED_FACTOR = 1.5
 SLOW_SCAN_MIN_SPEED_FACTOR = 0.02
-# Sleep constraints between 2 filefrags call in full refresh thread
-MIN_DELAY_BETWEEN_FILEFRAGS = 0.1 / $speed_multiplier
-MAX_DELAY_BETWEEN_FILEFRAGS = 120 / $speed_multiplier
 # Batch size constraints for full refresh thread
 # don't make it so large that at cruising speed it could overflow the queue
 # with only one batch
 MAX_FILES_BATCH_SIZE = MAX_QUEUE_LENGTH / 4
 MIN_FILES_BATCH_SIZE = 1
+# Constraints on the delay between batches
+MIN_DELAY_BETWEEN_FILEFRAGS = 0.1
+MAX_DELAY_BETWEEN_FILEFRAGS = 120
 
 # If the background thread consolidating writes can't be scheduled soon enough
 # we trigger an emergency consolidation to avoid slowing down more as
@@ -1965,7 +1992,7 @@ class BtrfsDev
   def defrag_cmd
     return @defrag_cmd if @defrag_cmd
     cmd =
-      [ "btrfs", "filesystem", "defragment", "-t", $default_extent_size, "-f" ]
+      [ "btrfs", "filesystem", "defragment", "-t", $extent_size, "-f" ]
     cmd << "-c#{comp_algo_param_value}" if @compression_algo
     @defrag_cmd = cmd
   end
@@ -2172,12 +2199,9 @@ class BtrfsDev
 
     def wait_slow_scan_restart
       # If @filecount.nil? we were counting files, restart fast
-      sleep (if @filecount && scan_time_left > 0
-             [ [ scan_time_left, MIN_DELAY_BETWEEN_FILEFRAGS ].max,
-               MAX_DELAY_BETWEEN_FILEFRAGS ].min
-             else
-               MIN_DELAY_BETWEEN_FILEFRAGS
-             end)
+      return unless @filecount && scan_time_left > 0
+
+      delay [ scan_time_left, MAX_DELAY_BETWEEN_SLOW_SCANS ].min
     end
 
     def scan_time
