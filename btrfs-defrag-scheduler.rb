@@ -1665,7 +1665,7 @@ class FilesState
     return unless current_size > target
 
     start = current_size - target
-    @file_fragmentations[type][0...start]..each do |frag|
+    @file_fragmentations[type][0...start].each do |frag|
       @to_defrag_hashes[type].delete(frag.short_filename)
     end
     @file_fragmentations[type] = @file_fragmentations[type][start..-1]
