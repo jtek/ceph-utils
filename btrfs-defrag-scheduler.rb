@@ -2361,8 +2361,14 @@ class BtrfsDev
         # ignore files with unparsable names
         short_name = short_filename(path) rescue ""
         next if short_name == ""
+        stat = begin
+                 File::Stat.new(path)
+               rescue => ex
+                 info "- #{@dirname} #{path} removed, #{ex.class}: #{ex.message}"
+                 next
+               end
         # Only process file entries (File.file? is true for symlinks)
-        next if !File.file?(path) || File.symlink?(path)
+        next if !stat.file? || stat.symlink?
         @considered += 1
 
         # Don't process during a resume
@@ -2381,14 +2387,10 @@ class BtrfsDev
         end
         # A file small enough to fit a node can't be fragmented
         # We don't count it as if nothing changes it won't become a target
-        begin
-          if File.size(path) <= 4096
-            @considered -= 1
-          else
-            @batch.add_path(path)
-          end
-        rescue Errno::ENOENT => ex
-          info "- #{@dirname} #{path} removed"
+        if stat.size <= 4096
+          @considered -= 1
+        else
+          @batch.add_path(path)
         end
       end
     rescue => ex
