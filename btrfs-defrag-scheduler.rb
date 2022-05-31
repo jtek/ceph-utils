@@ -371,14 +371,20 @@ class AsyncSerializer
   end
 
   def serialize_entry(file, key, value)
-    @serialization_queue.push [ file, key, value, Time.now ]
+    @serialization_queue.push [ file, key, value, Time.now.to_f ]
   end
 
   def unserialize_entry(file, key, op_id, default_value)
     file_load(file) unless @store_content[file]
     info("= #{op_id}, #{key}: %sloaded" %
-         (@store_content[file][key] ? "" : "default "))
-    @store_content[file][key] ||= { last_write: Time.now, data: default_value }
+         (!@store_content[file][key].nil? ? "" : "default "))
+    @store_content[file][key] ||= { last_write: Time.now.to_f,
+                                    data: default_value }
+    entry = @store_content[file][key]
+    # Convert old timestamps to match new internals
+    if entry[:last_write].is_a?(Time)
+      entry[:last_write] = entry[:last_write].to_f
+    end
     @store_content[file][key][:data]
   end
 
@@ -396,11 +402,12 @@ class AsyncSerializer
     loop do
       process_serialization_queue
       files = @store_tasks.select do |file, tstamps|
+        now = Time.now.to_f
         # If there's only one entry, no use waiting
         (@store_content[file].count == 1) ||
           # otherwise use delays to give a chance to others to join
-          tstamps[:last_write] < (Time.now - MIN_COMMIT_DELAY) ||
-          tstamps[:first_write] < (Time.now - MAX_COMMIT_DELAY)
+          tstamps[:last_write] < (now - MIN_COMMIT_DELAY) ||
+          tstamps[:first_write] < (now - MAX_COMMIT_DELAY)
       end.keys
       files.each { |file| @store_tasks.delete(file) }
       files.each { |file| file_write(file) }
@@ -421,17 +428,16 @@ class AsyncSerializer
   end
 
   def delay_until_next_write_check
-    max_expire = Time.now + LOOP_MAX_DELAY
+    max_expire = Time.now.to_f + LOOP_MAX_DELAY
     next_expiration = @store_tasks.values.map do |v|
       [ v[:last_write] + MIN_COMMIT_DELAY,
         v[:first_write] + MAX_COMMIT_DELAY ].min
     end.min
-    expire_at = [ next_expiration, max_expire ].compact.min
-    delay_until expire_at
+    delay_until Time.at([ next_expiration, max_expire ].compact.min)
   end
 
   def cleanup_old_keys(file)
-    now = Time.now
+    now = Time.now.to_f
     # Cleanup old keys
     @store_content[file].delete_if do |key, value|
       to_delete = value[:last_write] < (now - MAX_AGE)
@@ -441,11 +447,20 @@ class AsyncSerializer
   end
 
   def file_load(file)
-    now = Time.now
+    now = Time.now.to_f
     if File.file?(file)
       File.open(file, 'r:ascii-8bit') do |f|
         yaml = f.read
-        @store_content[file] = yaml.empty? ? {} : YAML.load(yaml) rescue {}
+        @store_content[file] = if yaml.empty?
+                                 {}
+                               else
+                                 begin
+                                   YAML.load(yaml)
+                                 rescue => ex
+                                   info "#{file} load error: #{ex.message}"
+                                   {}
+                                 end
+                               end
         info "= #{file} loaded"
       end
     else
@@ -453,10 +468,11 @@ class AsyncSerializer
     end
     # Migrate keys to new format
     hash = @store_content[file]
-    hash.select do |key, value|
+    hash.each do |key, value|
       unless value[:last_write]
+        info "= #{file} migrating #{key} to timestamped value"
         hash[key] = { last_write: now, data: value }
-        end
+      end
     end
     cleanup_old_keys(file)
   end
@@ -1082,12 +1098,14 @@ class FilesState
         @bitarray =
           "\0".force_encoding(Encoding::ASCII_8BIT) *
           (MAX_ENTRIES / ENTRIES_PER_BYTE)
-        @last_tick = Time.now
+        @last_tick = Time.now.to_f
         @size = 0
         return
       end
       @bitarray = serialized_data["bitarray"]
-      @last_tick = serialized_data["last_tick"]
+      # Old versions tried to serialize a Time object
+      # Recent Ruby versions reject them so convert to avoid migration pains
+      @last_tick = serialized_data["last_tick"].to_f
       @bitarray.force_encoding(Encoding::ASCII_8BIT)
       compute_size
     end
@@ -1151,7 +1169,8 @@ class FilesState
     end
 
     def advance_clock_when_needed
-      tick! while (@last_tick + @tick_interval) < Time.now
+      now = Time.now.to_f
+      tick! while (@last_tick + @tick_interval) < now
     end
 
     # Rewrite bitarray, decrementing each value and updating size
@@ -1640,8 +1659,6 @@ class FilesState
     cleanup_cost_history
 
     @last_history_serialized_at = Time.now
-    # Force thresholds computation
-    @last_thresholds_at = Time.at(0)
     @cost_thresholds = {}
     @average_costs = {}
     @initial_costs = {}
@@ -1997,10 +2014,10 @@ class BtrfsDev
 
   # We prefer to store short filenames to free memory
   def short_filename(filename)
-    filename.gsub("#{dir}/", "")
+    filename.gsub(@dir_slash, "")
   end
   def full_filename(short_filename)
-    "#{dir}/#{short_filename}"
+    "#{@dir_slash}#{short_filename}"
   end
   def average_cost(type)
     @files_state.average_cost(type)
@@ -2432,8 +2449,7 @@ class BtrfsDev
     options = mount_options
     return nil unless options
     options.split(',').all? do |option|
-      !(option.start_with?("compress=") ||
-        option.start_with?("compress-force="))
+      !(option.start_with?("compress=", "compress-force="))
     end
   end
 
@@ -2449,8 +2465,7 @@ class BtrfsDev
     options = mount_options
     return nil unless options
     compress_option = options.split(',').detect do |option|
-      option.start_with?("compress=") ||
-        option.start_with?("compress-force=")
+      option.start_with?("compress=", "compress-force=")
     end
     return nil unless compress_option
     compress_option.split('=')[1]
@@ -2561,12 +2576,14 @@ class BtrfsDev
 
   def load_exceptions(fs_dev_map)
     no_defrag_list = []
-    exceptions_file = "#{dir}/#{DEFRAG_BLACKLIST_FILE}"
+    exceptions_file = "#{@dir_slash}#{DEFRAG_BLACKLIST_FILE}"
     if File.readable?(exceptions_file)
       no_defrag_list =
-        File.read(exceptions_file).split("\n").map { |path| "#{dir}/#{path}" }
+        File.read(exceptions_file).split("\n")
+            .map { |path| "#{@dir_slash}#{path}" }
     end
     # Add mountpoints below our root that aren't a volume of the same FS
+    # TODO: ignore mountpoints below another ignored mountpoints
     no_defrag_list += fs_dev_map.select do |fs, dev|
       (fs != dir) && fs.start_with?(dir) && (@my_dev_id != dev)
     end.keys
@@ -2578,21 +2595,19 @@ class BtrfsDev
   end
 
   def blacklisted?(filename)
-    @no_defrag_list.any? { |blacklist| filename.start_with?(blacklist) }
+    filename.start_with?(*@no_defrag_list)
   end
 
   def ro_subvol?(dir)
-    @ro_subvols.include?(dir)
+    @ro_subvols_set.include?(dir)
   end
 
   # This updates the subvolume list and tracks their mountpoints and
   # system device ids (for #known?)
   def update_subvol_dirs(dev_fs_map)
     subvol_dirs_list = BtrfsDev.subvolumes_by_writable(dir)
-    @rw_subvols =
-      (subvol_dirs_list[true]||[]).map { |subvol| "#{dir}/#{subvol}" }.to_set
-    @ro_subvols =
-      (subvol_dirs_list[false]||[]).map { |subvol| "#{dir}/#{subvol}" }.to_set
+    @rw_subvols = subvol_dirs_list[true] || []
+    @ro_subvols_set = (subvol_dirs_list[false] || []).to_set
 
     fs_map = {}
     dev_list = Set.new
@@ -2614,25 +2629,24 @@ class BtrfsDev
     @dev_list = dev_list
   end
 
-  def normalize_path_slash(dir)
-    return dir if dir.end_with?("/")
-
-    "#{dir}/"
-  end
-
   def flush_all
     @files_state.flush_all
     @rate_controller.flush_all
   end
 
+  def normalize_path_slash(dir)
+    self.class.normalize_path_slash(dir)
+  end
+
   class << self
     def list_subvolumes(dir)
+      dir_slash = normalize_path_slash(dir)
       new_subdirs = []
       IO.popen([ "btrfs", "subvolume", "list", dir ]) do |io|
         while line = io.gets do
           line.chomp!
           if match = line.match(/^.* path (.*)$/)
-            new_subdirs << match[1]
+            new_subdirs << "#{dir_slash}#{match[1]}"
           else
             error "can't parse #{line}"
           end
@@ -2642,7 +2656,13 @@ class BtrfsDev
     end
 
     def subvolumes_by_writable(dir)
-      list_subvolumes(dir).group_by { |sub| File.writable?("#{dir}/#{sub}") }
+      list_subvolumes(dir).group_by { |sub| File.writable?(sub) }
+    end
+
+    def normalize_path_slash(dir)
+      return dir if dir.end_with?("/")
+
+      "#{dir}/"
     end
   end
 end
@@ -2821,8 +2841,9 @@ class BtrfsDevs
   end
 
   def top_volume?(dir)
-    BtrfsDev.list_subvolumes(dir).all? do |subdir|
-      Pathname.new("#{dir}/#{subdir}").mountpoint?
+    dir_slash = BtrfsDev.normalize_path_slash(dir)
+    BtrfsDev.list_subvolumes(dir_slash).all? do |subdir|
+      Pathname.new(subdir).mountpoint?
     end
   end
 
