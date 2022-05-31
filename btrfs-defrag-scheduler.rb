@@ -1721,7 +1721,7 @@ class BtrfsDev
   include AlgebraUtils
 
   # create the internal structures, including references to other mountpoints
-  def initialize(dir, dev_fs_map)
+  def initialize(dir, dev_fs_map, fs_dev_map)
     @dir = dir
     @dir_slash = dir.end_with?("/") ? dir : "#{dir}/"
     @dirname = File.basename(dir)
@@ -1736,17 +1736,17 @@ class BtrfsDev
 
     # Init filefrag time tracking and rate with sensible values
     @average_file_time = { cached: 0, not_cached: 0 }
-    detect_options(dev_fs_map)
+    detect_options(dev_fs_map, fs_dev_map)
   end
 
   def average_file_time(cached:)
     @average_file_time[cached_key(cached)]
   end
 
-  def detect_options(dev_fs_map)
+  def detect_options(dev_fs_map, fs_dev_map)
     @my_dev_id = File.stat(dir).dev
     update_subvol_dirs(dev_fs_map)
-    load_exceptions
+    load_exceptions(fs_dev_map)
     changed = false
     compressed = mounted_with_compress?
     if compressed.nil?
@@ -2549,13 +2549,18 @@ class BtrfsDev
         1 ].min, MIN_QUEUE_DEFRAG_SPEED_FACTOR ].max
   end
 
-  def load_exceptions
+  def load_exceptions(fs_dev_map)
     no_defrag_list = []
     exceptions_file = "#{dir}/#{DEFRAG_BLACKLIST_FILE}"
     if File.readable?(exceptions_file)
       no_defrag_list =
         File.read(exceptions_file).split("\n").map { |path| "#{dir}/#{path}" }
     end
+    # Add mountpoints below our root that aren't a volume of the same FS
+    no_defrag_list += fs_dev_map.select do |fs, dev|
+      (fs != dir) && fs.start_with?(dir) && (@my_dev_id != dev)
+    end.keys
+
     if no_defrag_list.any? && (@no_defrag_list != no_defrag_list)
       info "= #{dir} blacklist: #{no_defrag_list.inspect}"
     end
@@ -2701,6 +2706,18 @@ class BtrfsDevs
     dev_fs_map = Hash.new { |hash, key| hash[key] = Set.new }
     dirs.each { |dir, _options| dev_fs_map[File.stat(dir).dev] << dir }
 
+    # Build a mountpoint to dev map to detect nested mountpoints from
+    # other devs to ignore
+    allmounts = File.open("/proc/mounts", "r") do |f|
+      f.readlines.map { |line| line.split(' ') }
+    end.map { |ary| ary[1] }
+    fs_dev_map = allmounts.map do |dir|
+      # Note: rescue nil is for handling a case where root can't access
+      # a mount point (seems like a mostly harmless bug with tmpfs)
+      dev_id = File.stat(dir).dev rescue nil
+      [ dir, dev_id ]
+    end.to_h
+
     umounted =
       @btrfs_devs.select { |dev| !dirs.map(&:first).include?(dev.dir) }
     umounted.each do |dev|
@@ -2712,14 +2729,14 @@ class BtrfsDevs
       @btrfs_devs.select { |dev| dirs.map(&:first).include?(dev.dir) }
 
     # Detect remount -o compress=... events and (no)autodefrag
-    still_mounted.each { |dev| dev.detect_options(dev_fs_map) }
+    still_mounted.each { |dev| dev.detect_options(dev_fs_map, fs_dev_map) }
     newly_mounted = []
     dirs.map(&:first).each do |dir|
       next if known?(dir)
       next if still_mounted.map(&:dir).include?(dir)
       # More costly, tested last
       next unless top_volume?(dir)
-      newly_mounted << BtrfsDev.new(dir, dev_fs_map)
+      newly_mounted << BtrfsDev.new(dir, dev_fs_map, fs_dev_map)
       @new_fs = true if detect_new_fs
     end
     new_devs = still_mounted + newly_mounted
