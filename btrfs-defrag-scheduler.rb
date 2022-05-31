@@ -2361,14 +2361,15 @@ class BtrfsDev
         # ignore files with unparsable names
         short_name = short_filename(path) rescue ""
         next if short_name == ""
+        next if File.symlink?(path)
         stat = begin
                  File::Stat.new(path)
                rescue => ex
                  info "- #{@dirname} #{path} removed, #{ex.class}: #{ex.message}"
                  next
                end
-        # Only process file entries (File.file? is true for symlinks)
-        next if !stat.file? || stat.symlink?
+        # Only process file entries (File::Stat.new follows symlinks)
+        next if !stat.file?
         @considered += 1
 
         # Don't process during a resume
