@@ -1089,7 +1089,7 @@ class FilesState
       @bitarray = serialized_data["bitarray"]
       @last_tick = serialized_data["last_tick"]
       @bitarray.force_encoding(Encoding::ASCII_8BIT)
-      @size = compute_size
+      compute_size
     end
 
     # Expects a string
