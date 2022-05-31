@@ -107,7 +107,8 @@ opts =
                  [ '--speed-multiplier', '-m', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--slow-start', '-l', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--drive-count', '-c', GetoptLong::REQUIRED_ARGUMENT ],
-                 [ '--target-load', '-t', GetoptLong::REQUIRED_ARGUMENT ])
+                 [ '--target-load', '-t', GetoptLong::REQUIRED_ARGUMENT ],
+                 [ '--no-timestamp', '-n', GetoptLong::NO_ARGUMENT ])
 
 # Latest recommendation from BTRFS developpers as of 2016
 $defragment_trees = false
@@ -115,6 +116,7 @@ $verbose = false
 $debug = false
 $ignore_load = false
 $target_load = nil
+$log_timestamps = true
 $drive_count = $defaults[:drive_count]
 speed_multiplier = $defaults[:speed_multiplier]
 fragmentation_threshold = $defaults[:threshold]
@@ -153,6 +155,8 @@ opts.each do |opt,arg|
     $ignore_load = true
   when '--target_load'
     $target_load = arg.to_f
+  when '--no-timestamp'
+    $log_timestamps = false
   end
 end
 $extent_size ||= $defaults[:extent_size]
@@ -291,8 +295,14 @@ DEFAULT_COMMIT_DELAY = 30
 DEFRAG_BLACKLIST_FILE = ".no_defrag"
 
 $logger = Logger.new(STDOUT)
-$logger.formatter = proc do |severity, datetime, progname, msg|
-  "%s: %s\n" % [ datetime.strftime("%Y%m%d %H%M%S"), msg ]
+if $log_timestamps
+  $logger.formatter = proc do |severity, datetime, progname, msg|
+    "%s: %s\n" % [ datetime.strftime("%Y%m%d %H%M%S"), msg ]
+  end
+else
+  $logger.formatter = proc do |severity, datetime, progname, msg|
+    "#{msg}\n"
+  end
 end
 $logger.level = Logger::INFO
 
