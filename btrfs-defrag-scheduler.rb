@@ -2692,10 +2692,9 @@ class BtrfsDevs
     cmd = [ "fatrace", "-f", "W" ]
     extract_write_re = /\A[^(]+\([0-9]+\): [ORWC]+ (.*)\Z/
     loop do
-      failed = false
       info("= (Re-)starting global fatrace thread")
       begin
-        last_popen_at = Time.now
+        next_popen_at = Time.now + FATRACE_TTL
         IO.popen(cmd) do |io|
           begin
             while line = io.gets do
@@ -2707,7 +2706,7 @@ class BtrfsDevs
                 error "** Can't extract file from '#{line}'"
               end
               # TODO: Maybe don't check on each pass (benchmark this)
-              break if Time.now > (last_popen_at + FATRACE_TTL)
+              break if Time.now > next_popen_at
               # Fatrace should be able to detect writes on newly mounted fs
               # that said bugs where encountered, so this forces a restart
               break if recent_new_fs?
@@ -2719,14 +2718,12 @@ class BtrfsDevs
           end
         end
       rescue => ex
-        failed = true
         error "** Error in outer fatrace thread: #{ex}"
+        delay = 60
+        # Arbitrary sleep to avoid CPU load in case of fatrace repeated failure
+        info("= Fatrace thread waiting #{delay}s before restart")
+        sleep delay
       end
-      next unless failed
-      # Arbitrary sleep to avoid CPU load in case of fatrace repeated failure
-      delay = 60
-      info("= Fatrace thread waiting #{delay}s before restart")
-      sleep delay
     end
   end
 
