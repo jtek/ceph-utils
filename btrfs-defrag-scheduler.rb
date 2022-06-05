@@ -473,6 +473,9 @@ class AsyncSerializer
         info "= #{file} migrating #{key} to timestamped value"
         hash[key] = { last_write: now, data: value }
       end
+      if value[:last_write].is_a?(Time)
+        value[:last_write] = value[:last_write].to_f
+      end
     end
     cleanup_old_keys(file)
   end
