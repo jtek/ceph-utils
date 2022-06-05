@@ -856,7 +856,7 @@ class FilefragParser
       @filename = Regexp.last_match(1)
     when /^(.+): \d+ extents? found$/n
       if @filename != Regexp.last_match(1)
-        error("Couldn't understand this part:\n" +
+        error("** Couldn't understand this part:\n" +
               @buffer.join("\n") +
               "\n** #{@filename} ** !=\n** #{Regexp.last_match(1)} **")
       else
@@ -2422,7 +2422,7 @@ class BtrfsDev
         end
       end
     rescue => ex
-      error("Couldn't process #{dir}: " \
+      error("** Couldn't process #{dir}: " \
             "#{ex}\n#{ex.backtrace.join("\n")}")
       # Don't wait for a SLOW_SCAN_PERIOD but don't create load either
       @rate_controller.target_stop_time = Time.now + MAX_DELAY_BETWEEN_FILEFRAGS
@@ -2648,7 +2648,7 @@ class BtrfsDev
           if match = line.match(/^.* path (.*)$/)
             new_subdirs << "#{dir_slash}#{match[1]}"
           else
-            error "can't parse #{line}"
+            error "** can't parse #{line}"
           end
         end
       end
@@ -2701,7 +2701,7 @@ class BtrfsDevs
               if extract_write_re =~ line
                 handle_file_write($1)
               else
-                error "Can't extract file from '#{line}'"
+                error "** Can't extract file from '#{line}'"
               end
               # TODO: Maybe don't check on each pass (benchmark this)
               break if Time.now > (last_popen_at + FATRACE_TTL)
@@ -2709,13 +2709,13 @@ class BtrfsDevs
             end
           rescue => ex
             msg = "#{ex}\n#{ex.backtrace.join("\n")}"
-            error "Error in inner fatrace thread: #{msg}"
+            error "** Error in inner fatrace thread: #{msg}"
             sleep 1 # Limit CPU load in case of bug
           end
         end
       rescue => ex
         failed = true
-        error "Error in outer fatrace thread: #{ex}"
+        error "** Error in outer fatrace thread: #{ex}"
       end
       next unless failed
       # Arbitrary sleep to avoid CPU load in case of fatrace repeated failure
