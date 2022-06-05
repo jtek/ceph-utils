@@ -2693,7 +2693,7 @@ class BtrfsDevs
     extract_write_re = /\A[^(]+\([0-9]+\): [ORWC]+ (.*)\Z/
     loop do
       failed = false
-      info("= Starting global fatrace thread")
+      info("= (Re-)starting global fatrace thread")
       begin
         last_popen_at = Time.now
         IO.popen(cmd) do |io|
@@ -2708,6 +2708,8 @@ class BtrfsDevs
               end
               # TODO: Maybe don't check on each pass (benchmark this)
               break if Time.now > (last_popen_at + FATRACE_TTL)
+              # Fatrace should be able to detect writes on newly mounted fs
+              # that said bugs where encountered, so this forces a restart
               break if recent_new_fs?
             end
           rescue => ex
@@ -2837,7 +2839,6 @@ class BtrfsDevs
   # To call to detect a new fs being added to the watch list
   def recent_new_fs?
     # Using a copy and only resetting on true makes this thread-safe
-    # we can't ignore a new filesystem
     copy = @new_fs
     @new_fs = false if copy
     copy
