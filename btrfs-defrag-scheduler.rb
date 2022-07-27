@@ -2590,7 +2590,7 @@ class BtrfsDev
     # Add mountpoints below our root that aren't a volume of the same FS
     # TODO: ignore mountpoints below another ignored mountpoints
     no_defrag_list += fs_dev_map.select do |fs, dev|
-      (fs != dir) && fs.start_with?(dir) && (@my_dev_id != dev)
+      (fs != dir) && fs.start_with?(@dir_slash) && (@my_dev_id != dev)
     end.keys
 
     if no_defrag_list.any? && (@no_defrag_list != no_defrag_list)
