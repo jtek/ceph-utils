@@ -237,7 +237,9 @@ SLOW_SCAN_SPEED_INCREASE_STEP = 1.1
 MAX_DELAY_BETWEEN_SLOW_SCANS = 120
 
 # These are used to compensate for deviation of the slow scan progress
-SLOW_SCAN_MAX_SPEED_FACTOR = 1.5
+# During low load, try to target a higher speed to get ahead
+SLOW_SCAN_MAX_SPEED_FACTOR = 1.25
+# During high load, slow down
 SLOW_SCAN_MIN_SPEED_FACTOR = 0.02
 # Batch size constraints for full refresh thread
 # don't make it so large that at cruising speed it could overflow the queue
