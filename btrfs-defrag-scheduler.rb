@@ -1150,9 +1150,9 @@ class FilesState
       {
         # Dup is used for moving data because it isn't stored right away
         # and @last_tick is reassigned while @bitarray is changed in place
-        # @bitarray.dup would be sufficient, but this makes it more robust
+        # @bitarray.dup is enough Float#dup isn't supported by old Ruby versions
         "bitarray" => @bitarray.dup,
-        "last_tick" => @last_tick.dup,
+        "last_tick" => @last_tick,
         "ttl" => IGNORE_AFTER_DEFRAG_DELAY,
         "bits_per_entry" => BITS_PER_ENTRY
       }
