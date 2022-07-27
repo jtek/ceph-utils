@@ -14,12 +14,12 @@ CHOICE_WINDOW_PROPORTION = 0.10
 # to avoid the automatic deep scrubs to collide with the scheduled ones.
 # The difference allows pauses in scrubbing, which is needed to handle
 # rebalancing events without overloading the cluster
-DEEP_SCRUB_TARGET_PERIOD = 14 * 24 * 3600 # 2 weeks
-# Set "osd scrub min interval" to 2 days in ceph.conf
-SCRUB_TARGET_PERIOD = 48 * 3600          # 2 days
+DEEP_SCRUB_TARGET_PERIOD = 6 * 7 * 24 * 3600 # 6 weeks
+# Set "osd scrub min interval" to 7 days in ceph.conf
+SCRUB_TARGET_PERIOD = 5 * 24 * 3600              # 5 days
 DELAY_WHEN_UNSYNCED = 60                 # 1 minute before checking again
 MAX_PARALLEL_DEEP_SCRUBS = 2
-MAX_PARALLEL_SCRUBS = 4
+MAX_PARALLEL_SCRUBS = 6
 ADMIN_MAIL = "root@localhost"
 # Assume we get 1/10 of the disk rate (used to delay concurrent activity)
 REPAIR_BYTE_RATE = 100_000_000 / 10
