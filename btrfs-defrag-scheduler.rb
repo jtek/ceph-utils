@@ -1174,7 +1174,6 @@ class FilesState
     # Expects a string
     # set value to max in the entry (0 will indicate entry has expired)
     def event(object_id)
-      advance_clock_when_needed
       position, offset = position_offset(object_id)
 
       byte = @bitarray.getbyte(position)
@@ -1194,7 +1193,6 @@ class FilesState
     end
 
     def recent?(object_id)
-      advance_clock_when_needed
       position, offset = position_offset(object_id)
       byte = @bitarray.getbyte(position)
       offset.times { byte = (byte >> BITS_PER_ENTRY) }
@@ -1214,6 +1212,18 @@ class FilesState
       }
     end
 
+    def tick_handler_for_async_runner
+      advance_clock
+      next_tick_at
+    end
+
+    def next_tick_at
+      # Add a fration of a second to avoid being scheduled too soon
+      # should not be needed but costs almost nothing and clocks are tricky
+      # AsyncRunner expects a Time object
+      Time.at(@last_tick + @tick_interval + 0.001)
+    end
+
     private
 
     def compute_size
@@ -1229,14 +1239,17 @@ class FilesState
       end
     end
 
-    def advance_clock_when_needed
+    # Make sure
+    def advance_clock
       now = Time.now.to_f
+      if (@last_tick + @tick_interval) >= now
+        error "** F"
+      end
       tick! while (@last_tick + @tick_interval) < now
     end
 
     # Rewrite bitarray, decrementing each value and updating size
     def tick!
-      info "## FuzzyEventTracker size was: #{size}" if $debug
       @last_tick += @tick_interval
       return if @size == 0 # nothing to be done
       @size = 0
@@ -1257,7 +1270,6 @@ class FilesState
         end
         @bitarray.setbyte(byte_idx, byte)
       end
-      info "## FuzzyEventTracker size is: #{size}" if $debug
     end
 
     # The actual position slowly changes (once every ROTATING_PERIOD)
@@ -1662,6 +1674,14 @@ class FilesState
     end
   end
 
+  def next_event_tracker_tick_at
+    @recently_defragmented.next_tick_at
+  end
+
+  def event_tracker_tick_handler_for_async_runner
+    @recently_defragmented.tick_handler_for_async_runner
+  end
+
   private
   # MUST be protected by @fragmentation_info_mutex
   def next_available_type
@@ -1909,6 +1929,10 @@ class BtrfsDev
     @runner.add_task(name: "usage policy checker cleanup") do
       @checker.cleanup
       Time.now + DEVICE_LOAD_WINDOW
+    end
+    @runner.add_task(name: "fuzzy event tracker ticks",
+                     time: @files_state.next_event_tracker_tick_at ) do
+      @files_state.event_tracker_tick_handler_for_async_runner
     end
     @async_thread = Thread.new { @runner.run }
 
