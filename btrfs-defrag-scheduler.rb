@@ -345,13 +345,27 @@ else
     "#{msg}\n"
   end
 end
-$logger.level = Logger::INFO
+$logger.level = $debug ? Logger::DEBUG : Logger::INFO
 
 module Outputs
   def error(msg)
     $logger.error msg
   end
   def info(msg)
+    $logger.info msg
+  end
+
+  # These support strings or blocks
+  def debug(msg = nil)
+    return unless $logger.debug?
+
+    msg ||= (block_given? ? yield : nil)
+    $logger.debug msg
+  end
+  def verbose(msg = nil)
+    return unless $verbose
+
+    msg ||= (block_given? ? yield : nil)
     $logger.info msg
   end
 end
@@ -782,8 +796,8 @@ class UsagePolicyChecker
       end
     end
     # We return the max to avoid the possibility of waiting twice
-    info "## dichotomy: %d steps, %.2fs, result: %.2fs" %
-         [ steps, (Time.now - start), max ] if $debug
+    debug { "## dichotomy: %d steps, %.2fs, result: %.2fs" %
+            [ steps, (Time.now - start), max ] }
     max
   end
 end
@@ -1997,16 +2011,15 @@ class BtrfsDev
     @files_state.defragmented!(shortname)
     filename = file_frag.filename
     size = file_frag.size
-    if $verbose
+    verbose do
       # Deal with file deletion race condition
-      mtime = File.mtime(file_frag.filename) rescue nil
-      msg = " - %s: %s %s,%s,%.2f,%s" %
-            [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
-              human_size(file_frag.size), file_frag.fragmentation_cost,
-              human_delay_since(mtime) ]
-      info(msg)
+      mtime = File.mtime(filename) rescue nil
+      " - %s: %s %s,%s,%.2f,%s" %
+        [ dir, shortname, (file_frag.majority_compressed? ? "C" : "U"),
+          human_size(size), file_frag.fragmentation_cost,
+          human_delay_since(mtime) ]
     end
-    run_with_device_usage { system(*defrag_cmd, file_frag.filename) }
+
     if $chunk_size && size > $chunk_size
       start = 0
       start_at = Time.now if $verbose
@@ -2024,6 +2037,10 @@ class BtrfsDev
         expected_chunk_defrag_duration = defrag_time * next_chunk_size / size
         delay_until(available_for_defrag_at(expected_chunk_defrag_duration))
       end
+      verbose do
+        " - %s: %s LAST CHUNK, %s" % [ dir, shortname,
+                                       human_duration(Time.now - start_at) ]
+      end
     else
       run_with_device_usage { system(*defrag_cmd, filename) }
     end
@@ -2035,16 +2052,16 @@ class BtrfsDev
   # structures: extent and subvolume trees. Can destroy performance on HDD
   def defragment_extent_and_subvolume_trees
     # Defragment root subvolume
-    info " - #{dir}: root subvolume extent and subvolume trees" if $verbose
+    verbose { " - #{dir}: root subvolume extent and subvolume trees" }
     run_with_device_usage { system(*defrag_cmd, dir) }
-    info " - #{dir}: root subvolume trees done" if $verbose
+    verbose { " - #{dir}: root subvolume trees done" }
     @rw_subvols.each do |subvol|
       # Let other threads have an opportunity to work as these are blocking
       # Thread.pass should be enough but it doesn't offer any guarantee
       Thread.pass; sleep 0.1
-      info " - #{dir}: #{subvol} extent and subvolume trees" if $verbose
+      verbose { " - #{dir}: #{subvol} extent and subvolume trees" }
       run_with_device_usage { system(*defrag_cmd, subvol) }
-      info " - #{dir}: #{subvol} trees done" if $verbose
+      verbose { " - #{dir}: #{subvol} trees done" }
     end
   end
 
@@ -2282,7 +2299,7 @@ class BtrfsDev
       @filecount = total || @filecount
       serialize_filecount
       @last_filecount_updated_at = now
-      info "# #{@dev.dirname}, #{entry.inspect}" if total && $debug
+      debug { "# #{@dev.dirname}, #{entry.inspect}" } if total
     end
 
     def wait_slow_scan_restart
