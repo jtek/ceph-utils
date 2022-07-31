@@ -11,14 +11,23 @@ Defragmentation scheduler
 By default it stores its state in the /root/.btrfs_defrag directory which it
 creates automatically.
 
-The scheduler both tracks file writes to detect recent heavy fragmentation and
-slowly scans the whole filesystem over a one month period (the number of hours
-targeted for this slow scan can be passed as a parameter). During the slow
-scan it detects fragmentation it didn't have time to process yet.
+The scheduler:
+* tracks file writes to detect recent heavy fragmentation
+* slowly scans the whole filesystem over a one month period (the number of hours
+targeted for this slow scan can be passed as a parameter).
+During the slow scan it detects fragmentation it didn't have time to process yet.
 
-The scheduler tries to restrict IO load and memory usage in several ways. With
-default settings it should not put any significant load on a Ceph OSD and
-should not use significantly more than 100MB of memory by OSD.
+The scheduler tries to restrict IO load and memory usage in several ways.
+
+With default settings it should not put any significant load on a Ceph OSD.
+If your filesystem is hosting large files and defragmenting them creates large
+load spikes, you can use --defrag-chunk-size to split the defragmentation
+process. The scheduler will pause as needed between the chunks to limit the
+load.
+
+It should not use significantly more than 100MB of memory by OSD as it actively
+limits the sizes of its internal structures. On a 35 disk systems the process
+resident memory has been measured <1.5GB.
 
 The latest versions are able to handle more standard Btrfs usages (with many
 snapshots for example). It won't try to defragment read-only snapshots, will
