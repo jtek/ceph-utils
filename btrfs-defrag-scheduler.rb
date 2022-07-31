@@ -13,7 +13,7 @@ require 'logger'
 require 'etc'
 
 $defaults = {
-  extent_size: '32M',
+  extent_size: 33554432,
   threshold: 1.05,
   speed_multiplier: 1.0,
   slow_start: 600,
@@ -37,7 +37,17 @@ Recognized options:
 
 --target-extent-size <value> (-e)
     value passed to btrfs filesystem defrag "-t" parameter
+    supported size suffixes are the same than the ones btrfs fi defrag supports
+    except 'K' which is too small to make sense
     default: #{$defaults[:extent_size]}
+
+--defrag-chunk-size <value> (-k)
+    if passed, split the file in chunks of this size when defragmenting
+    pausing between chunks according to device usage limits
+    supported suffixes are the same than target-extent-size
+    this value should be a multiple of the target-extent-size and
+    processable (readable) in a relatively short time
+    default: none (process files in a single chunk)
 
 --threshold <value> (-w)
     minimum fragmentation cost needed to trigger defragmentation
@@ -104,6 +114,7 @@ opts =
                  [ '--trees', '-f', GetoptLong::NO_ARGUMENT ],
                  [ '--target-extent-size', '-e',
                    GetoptLong::REQUIRED_ARGUMENT ],
+                 [ '--defrag-chunk-size', '-k', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--speed-multiplier', '-m', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--slow-start', '-l', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--drive-count', '-c', GetoptLong::REQUIRED_ARGUMENT ],
@@ -118,10 +129,33 @@ $ignore_load = false
 $target_load = nil
 $log_timestamps = true
 $drive_count = $defaults[:drive_count]
+$extent_size = $defaults[:extent_size]
+$chunk_size = nil
 speed_multiplier = $defaults[:speed_multiplier]
 fragmentation_threshold = $defaults[:threshold]
 slow_start = $defaults[:slow_start]
 scan_time = nil
+
+def convert_size(size)
+  size = size.upcase
+  if matchdata = size.match(/^(\d+)([MGTPE])$/)
+    return case matchdata[2]
+           when 'M'
+             matchdata[1].to_i * 2**20
+           when 'G'
+             matchdata[1].to_i * 2**30
+           when 'T'
+             matchdata[1].to_i * 2**40
+           when 'P'
+             matchdata[1].to_i * 2**50
+           when 'E'
+             matchdata[1].to_i * 2**60
+           end
+  else
+    raise "Invalid size #{size}"
+  end
+end
+
 opts.each do |opt,arg|
   case opt
   when '--help'
@@ -140,7 +174,9 @@ opts.each do |opt,arg|
   when '--trees'
     $defragment_trees = true
   when '--target-extent-size'
-    $extent_size = arg
+    $extent_size = convert_size(arg)
+  when '--defrag-chunk-size'
+    $chunk_size = convert_size(arg)
   when '--speed-multiplier'
     multiplier = arg.to_f
     next if multiplier <= 0
@@ -159,7 +195,10 @@ opts.each do |opt,arg|
     $log_timestamps = false
   end
 end
-$extent_size ||= $defaults[:extent_size]
+if $chunk_size && ($chunk_size % $extent_size) != 0
+  STDERR.puts "## WARNING: defrag-chunk-size not multiple of target-extent-size"
+  STDERR.puts "## chunk: #{$chunk_size}, extent: #{$extent_size}"
+end
 
 # This defragments Btrfs filesystem files
 # the whole FS is scanned over SLOW_SCAN_PERIOD
@@ -531,6 +570,7 @@ module HumanFormat
                    3600      => "h",
                    60        => "m",
                    1         => "s",
+                   0.001     => "ms",
                    nil       => "now" }
     delay_maps.each do |amount, suffix|
       return suffix unless amount
@@ -643,6 +683,8 @@ end
 
 # Limit disk available bandwidth usage
 class UsagePolicyChecker
+  include Outputs
+
   def initialize(btrfs)
     @btrfs = btrfs
     @device_uses = []
@@ -1276,7 +1318,15 @@ class FilesState
   def next_defrag_duration
     @fragmentation_info_mutex.synchronize do
       last_filefrag = @file_fragmentations[next_available_type].last
-      last_filefrag ? last_filefrag.defrag_time : nil
+      return nil unless last_filefrag
+
+      # We return the next chunk defrag duration if defrag by chunk is active
+      file_size = last_filefrag.size
+      if $chunk_size && file_size > $chunk_size
+        last_filefrag.defrag_time * $chunk_size / file_size
+      else
+        last_filefrag.defrag_time
+      end
     end
   end
 
@@ -1945,6 +1995,8 @@ class BtrfsDev
     shortname = file_frag.short_filename
     # We declare it defragmented ASAP to avoid a double queue
     @files_state.defragmented!(shortname)
+    filename = file_frag.filename
+    size = file_frag.size
     if $verbose
       # Deal with file deletion race condition
       mtime = File.mtime(file_frag.filename) rescue nil
@@ -1955,6 +2007,26 @@ class BtrfsDev
       info(msg)
     end
     run_with_device_usage { system(*defrag_cmd, file_frag.filename) }
+    if $chunk_size && size > $chunk_size
+      start = 0
+      start_at = Time.now if $verbose
+      next_chunk_size = $chunk_size
+      defrag_time = file_frag.defrag_time
+      loop do
+        run_with_device_usage do
+          system(*defrag_cmd, '-s', start.to_s, '-l', next_chunk_size.to_s,
+                 filename)
+        end
+        start += $chunk_size
+        break if start >= size
+
+        next_chunk_size = [ size - start, $chunk_size ].min
+        expected_chunk_defrag_duration = defrag_time * next_chunk_size / size
+        delay_until(available_for_defrag_at(expected_chunk_defrag_duration))
+      end
+    else
+      run_with_device_usage { system(*defrag_cmd, filename) }
+    end
     queue_defragmentation_performance_check(file_frag)
   end
 
@@ -2008,7 +2080,7 @@ class BtrfsDev
   def defrag_cmd
     return @defrag_cmd if @defrag_cmd
     cmd =
-      [ "btrfs", "filesystem", "defragment", "-t", $extent_size, "-f" ]
+      [ "btrfs", "filesystem", "defragment", "-t", $extent_size.to_s, "-f" ]
     cmd << "-c#{comp_algo_param_value}" if @compression_algo
     @defrag_cmd = cmd
   end
@@ -2559,10 +2631,12 @@ class BtrfsDev
     slow_status
   end
 
-  def available_for_defrag_at
-    next_defrag_duration = @files_state.next_defrag_duration
-    if next_defrag_duration
-      @checker.available_at(expected_time: next_defrag_duration,
+  # Pass expected_duration when processing a file in chunks otherwise
+  # this peeks at the next file to defragment
+  def available_for_defrag_at(expected_duration = nil)
+    expected_duration ||= @files_state.next_defrag_duration
+    if expected_duration
+      @checker.available_at(expected_time: expected_duration,
                             use_limit_factor: low_queue_defrag_speed_factor)
     else
       # avoid busy loop, this is the maximum wait available_at could return
