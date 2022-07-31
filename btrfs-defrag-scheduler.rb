@@ -1239,11 +1239,19 @@ class FilesState
       end
     end
 
-    # Make sure
+    # Advance the clock and test for abnormal conditions
+    # TODO: remove these tests later
     def advance_clock
       now = Time.now.to_f
       if (@last_tick + @tick_interval) >= now
-        error "** F"
+        error "** FuzzyEventTracker early tick scheduling"
+        return
+      end
+
+      tick!
+      if (@last_tick + @tick_interval) < now
+        error "** FuzzyEventTracker missed some ticks:" \
+              "#{@last_tick + @tick_interval} < #{now}"
       end
       tick! while (@last_tick + @tick_interval) < now
     end
