@@ -1184,7 +1184,7 @@ class FilesState
       end
       previous_value = nibbles[offset]
       nibbles[offset] = MAX_ENTRY_VALUE
-      nibbles.reverse.each do |value|
+      nibbles.reverse_each do |value|
         byte = (byte << BITS_PER_ENTRY)
         byte += value
       end
@@ -1271,7 +1271,7 @@ class FilesState
           nibbles << entry
           byte = (byte >> BITS_PER_ENTRY)
         end
-        nibbles.reverse.each do |value|
+        nibbles.reverse_each do |value|
           @size += 1 if value > 0
           byte = (byte << BITS_PER_ENTRY)
           byte += value
