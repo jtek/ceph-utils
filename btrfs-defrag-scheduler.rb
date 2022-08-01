@@ -1603,11 +1603,11 @@ class FilesState
       [ candidates, @written_files.values.map(&:last).min ]
     end
 
-    # Use full filenames and filter deleted files
-    batch.map! { |short| @btrfs.full_filename(short) }
-         .select! { |filename| File.file?(filename)}
-    # Don't block caller too long
-    @to_filefrag.push batch
+    # Use full filenames and filter deleted files, pass them
+    # to the filefrag queue
+    batch.map { |short| @btrfs.full_filename(short) }
+         .select { |filename| File.file?(filename)}
+         .each { |filename| @to_filefrag.push filename }
     # When should we restart ?
     (min_last ? min_last + STOPPED_WRITING_DELAY : Time.now) +
       WRITTEN_FILES_CONSOLIDATION_PERIOD
@@ -1616,20 +1616,26 @@ class FilesState
   def filefrag_loop
     loop do
       # This one is there to block waiting for input without wasting resources
-      list = @to_filefrag.pop
-      # But we want to process everything
-      list += @to_filefrag.pop until @to_filefrag.empty?
+      list = []
+      list << @to_filefrag.pop
+      # But we want to process everything in a batch
+      list << @to_filefrag.pop until @to_filefrag.empty?
+      # Duplicates might be possible under heavy load
+      list.uniq!
       select_for_defragmentation(FileFragmentation.create(list, @btrfs,
                                                           cached: true))
-
+      # Under heavy load @to_filefrag can grow faster than
+      # select_for_defragmentation can process its entries
       skipped = 0
       while @to_filefrag.size > MAX_FILEFRAG_QUEUE_SIZE
         # Ignore oldests
         @to_filefrag.pop
         skipped += 1
       end
-      info("** %s: waiting_filefrag queue overflow, skipping %d" %
-           [ @btrfs.dirname, skipped ]) if skipped > 0
+      next unless skipped > 0
+
+      info("** %s: waiting_filefrag queue overflow, skipped %d" %
+           [ @btrfs.dirname, skipped ])
     end
   end
 
