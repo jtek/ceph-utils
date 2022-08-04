@@ -316,8 +316,7 @@ FATRACE_TTL = 24 * 3600 # every day
 FILEFRAG_ARG_MAX = 131072 - 100 - 4096
 
 # Overflow handling
-# This can create large slow down, clamp it down
-MAX_FILEFRAG_QUEUE_SIZE = 100
+MAX_FILEFRAG_QUEUE_SIZE = 1000
 # This queue processing should be fairly cheap (data should be in cache)
 # allow it to grow more
 MAX_PERF_QUEUE_SIZE = 500
