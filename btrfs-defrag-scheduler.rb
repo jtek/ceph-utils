@@ -2501,6 +2501,13 @@ class BtrfsDev
       Find.find(dir) do |path|
         (Find.prune; next) if prune?(path)
 
+        # Don't process during a resume (don't try to skip based
+        # on file type either to avoid IO load)
+        if @rate_controller.catching_up?(considered: @considered)
+          @considered += 1
+          next
+        end
+
         # ignore files with unparsable names
         short_name = short_filename(path) rescue ""
         next if short_name == ""
@@ -2514,9 +2521,6 @@ class BtrfsDev
         # Only process file entries (File::Stat.new follows symlinks)
         next if !stat.file?
         @considered += 1
-
-        # Don't process during a resume
-        next if @rate_controller.catching_up?(considered: @considered)
 
         # Ignore recently processed files
         if @files_state.recently_defragmented?(short_name)
