@@ -254,10 +254,11 @@ EXPECTED_COMPRESS_RATIO = 0.5
 # How many files do we track for writes, we pass these to the defragmentation
 # queue when write activity stops (this amount limits memory and CPU usage)
 MAX_TRACKED_WRITTEN_FILES = 10_000
-# Additional delay waiting for write expiration after next predicted expiration
-WRITTEN_FILES_CONSOLIDATION_PERIOD = 15
+# Avoid too frequent selection of expired write events for defragmentation
+# should be < STOPPED_WRITING_DELAY (see consolidate_writes)
+MIN_WRITTEN_FILES_LOOKUP_PERIOD = 5
 # No writes for that many seconds is interpreted as write activity stopped
-STOPPED_WRITING_DELAY = 5
+STOPPED_WRITING_DELAY = 30
 # Some files might be written to constantly, don't delay passing them to
 # filefrag more than that
 MAX_WRITES_DELAY = 8 * 3600
@@ -1593,8 +1594,13 @@ class FilesState
          .select { |filename| File.file?(filename)}
          .each { |filename| @to_filefrag.push filename }
     # When should we restart ?
-    (min_last ? min_last + STOPPED_WRITING_DELAY : Time.now) +
-      WRITTEN_FILES_CONSOLIDATION_PERIOD
+    if min_last
+      [ min_last + STOPPED_WRITING_DELAY,
+        Time.now + MIN_WRITTEN_FILES_LOOKUP_PERIOD ].max
+    else
+      # Nothing to process yet: this is the earliest we can have work to do
+      Time.now + STOPPED_WRITING_DELAY
+    end
   end
 
   def filefrag_loop
