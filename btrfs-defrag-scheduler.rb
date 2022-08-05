@@ -1050,6 +1050,7 @@ class FileFragmentation
   class << self
     include Delaying
 
+    # Pass cached: true if files are expected to be in cache
     def create(filelist, btrfs, cached:)
       frags = []
       until filelist.empty?
@@ -1304,8 +1305,8 @@ class FilesState
     @fragmentation_info_mutex = Mutex.new
     # Queue of FileFragmentation to defragment, ordered by fragmentation cost
     @file_fragmentations = { compressed: [], uncompressed: [] }
-    # The same, by their shortname in hashes
-    @to_defrag_hashes = { compressed: Hash.new, uncompressed: Hash.new }
+    # The same, by their shortname, stored as { type: type, frag: frag } hashes
+    @to_defrag_by_shortname = {}
 
     @last_queue_overflow_at = nil
     @fetch_accumulator = {
@@ -1372,7 +1373,7 @@ class FilesState
       @fetch_accumulator[current_type] = @fetch_accumulator[current_type] % 1.0
       TYPES.each { |type| @fetch_accumulator[type] += type_share(type) }
       frag = @file_fragmentations[current_type].pop
-      @to_defrag_hashes[current_type].delete(frag.short_filename)
+      @to_defrag_by_shortname.delete(frag.short_filename)
       frag
     end
   end
@@ -1428,54 +1429,38 @@ class FilesState
   # handles multi-thousands item lists and locks a mutex for its duration:
   # some care went into making this fast
   def select_for_defragmentation(file_fragmentations)
-    added = 0
-    to_delete_frags = Hash[ TYPES.map { |type| [ type, [] ] } ]
-    to_add_frags = Hash[ TYPES.map { |type| [ type, [] ] } ]
+    deleted_frags = Set.new
+    to_add_frags = {}
     @fragmentation_info_mutex.synchronize do
       # Process latest frags first (to allow ignoring older duplicates)
       file_fragmentations.reverse_each do |frag|
         shortname = frag.short_filename
-        new_type = frag.compress_type
-        old_type = known_file_frag_type(shortname)
-
         unless below_threshold_cost(frag)
-          # Don't add the same file twice to the same type as it would create
-          # a memory leak, the consequence is only negligible inefficiency if
-          # added to multiple types (conditions hard to meet too)
-          already_added = to_add_frags[new_type].any? do |frag|
-            frag.short_filename == shortname
-          end
-          next if already_added
-
-          added += 1 unless old_type
-          to_add_frags[new_type] << frag
+          # Don't add the same file twice
+          to_add_frags[shortname] ||= { type: frag.compress_type, frag: frag }
         end
-        next unless old_type
+        # Do we have an entry to delete
+        old_entry = @to_defrag_by_shortname.delete(shortname)
+        # Did we detect an entry to delete (ignore duplicates)?
+        next unless old_entry && !deleted_frags.include?(shortname)
 
-        to_delete_frags[old_type] <<
-          @to_defrag_hashes[old_type].delete(shortname)
+        deleted_frags << shortname
+        @file_fragmentations[old_entry[:type]].delete(old_entry[:frag])
       end
-      to_delete_frags.each do |type, list|
-        next if list.empty? # Common case, avoids reallocating instance var
-
-        @file_fragmentations[type] -= list
-      end
-      to_add_frags.each do |type, list|
-        @file_fragmentations[type].concat(list)
-        list.each do |frag|
-          @to_defrag_hashes[type][frag.short_filename] = frag
-        end
-      end
-      # No need to sort or trim if we only deleted entries
+      # No need to add/sort/trim if we only deleted entries
       # This is the common case when walking an already processed fs
-      break if added == 0
+      return 0 if to_add_frags.empty?
 
+      to_add_frags.each_value do |hash|
+        @file_fragmentations[hash[:type]] << hash[:frag]
+      end
+      @to_defrag_by_shortname.merge!(to_add_frags)
       # Keep the order to easily fetch the worst fragmented ones
       sort_frags
       # Remove old entries and fit in max queue length
       trim_frags
     end
-    added
+    to_add_frags.size
   end
 
   def file_written_to(filename)
@@ -1578,7 +1563,7 @@ class FilesState
       # used for each entry
       threshold = Time.now - STOPPED_WRITING_DELAY
       old_threshold = Time.now - MAX_WRITES_DELAY
-      # Detect writen files whose fragmentation should be checked
+      # Detect written files whose fragmentation should be checked
       candidates = @written_files.select do |shortname, value|
         (value.last < threshold) || (value.first < old_threshold)
       end.keys
@@ -1624,10 +1609,10 @@ class FilesState
       select_for_defragmentation(FileFragmentation.create(list, @btrfs,
                                                           cached: true))
       # Under heavy load @to_filefrag can grow faster than
-      # select_for_defragmentation can process its entries
+      # FileFragmentation.create can process new files
       skipped = 0
       while @to_filefrag.size > MAX_FILEFRAG_QUEUE_SIZE
-        # Ignore oldests
+        # Ignore oldest
         @to_filefrag.pop
         skipped += 1
       end
@@ -1810,7 +1795,7 @@ class FilesState
 
     start = current_size - target
     @file_fragmentations[type][0...start].each do |frag|
-      @to_defrag_hashes[type].delete(frag.short_filename)
+      @to_defrag_by_shortname.delete(frag.short_filename)
     end
     @file_fragmentations[type] = @file_fragmentations[type][start..-1]
   end
@@ -1829,12 +1814,6 @@ class FilesState
     else
       @cost_thresholds[:uncompressed]
     end
-  end
-  def known_file_frag_type(shortname)
-    @to_defrag_hashes.each do |type, hash|
-      return type if hash.key?(shortname)
-    end
-    nil
   end
 end
 
