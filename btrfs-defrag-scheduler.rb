@@ -2819,6 +2819,8 @@ class BtrfsDevs
             while line = io.gets do
               # Skip btrfs commands (defrag mostly)
               next if line.start_with?("btrfs(")
+              # TODO: maybe detect close syscalls to avoid timeouting
+              # WriteEvents ?
               if extract_write_re =~ line
                 handle_file_write($1)
               else
