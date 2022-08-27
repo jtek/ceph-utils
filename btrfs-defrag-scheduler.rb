@@ -2173,9 +2173,6 @@ class BtrfsDev
     key = cached_key(cached)
     @average_file_time[key] =
       memory_avg(@average_file_time[key], memory, time / count)
-    # Only batch from slow scan aren't cached and will need/be useful to update
-    # the batch target
-    @rate_controller.set_slow_batch_target unless cached
   end
 
   # Adjust filefrag call speed based on amount of queued files
@@ -2253,7 +2250,7 @@ class BtrfsDev
     include AlgebraUtils
 
     def initialize(dev:)
-      @pass = :none
+      @pass = :first
       @caught_up = false
       @dev = dev
       load_filecount
@@ -2291,15 +2288,11 @@ class BtrfsDev
     end
 
     def init_new_scan
-      # @pass logic probably overkill
-      case @pass
-      when :none
-        @pass = :first
+      if @pass == :first
         info("= #{@dev.dirname}: skipping #{@processed} files " \
              "in #{SLOW_SCAN_CATCHUP_WAIT}s")
-        # Avoids hammering disk just after boot (see "--slow-start" option)
+        # Avoid IO load just after boot (see "--slow-start" option)
         sleep SLOW_SCAN_CATCHUP_WAIT
-      when :first
         @pass = :non_first
       end
       @scan_start = Time.now
@@ -2532,6 +2525,7 @@ class BtrfsDev
     @last_slow_scan_batch_start = Time.now
     @batch = Batch.new(batch_size: @rate_controller.slow_batch_size) do
       queue_slow_scan_batch
+      @rate_controller.set_slow_batch_target
       @rate_controller.wait_next_slow_scan_pass
       @rate_controller.slow_batch_size
     end
