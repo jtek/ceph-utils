@@ -663,8 +663,13 @@ class LoadCheck
   LOAD_VALIDITY_PERIOD = 10
 
   def initialize
+    # Don't waste time if not needed
+    return if $ignore_load
+
+    # Make sure we have a valid value before being called
     update_load
-    @load_updater_thread = Thread.new do
+    # Update load in the background
+    Thread.new do
       loop do
         update_load
         sleep LOAD_VALIDITY_PERIOD
@@ -675,8 +680,11 @@ class LoadCheck
   # We don't slow down until load_ratio > 1
   def slowdown_ratio
     return 1 if $ignore_load
+
     [ load_ratio, 1 ].max
   end
+
+  private
 
   def load_ratio
     # Note: not protected by mutex because Ruby concurrent access semantics
@@ -684,19 +692,19 @@ class LoadCheck
     @load_ratio
   end
 
-  private
-
   def update_load
     @load_ratio = cpu_load / target_load
   end
 
+  # Returns the number of processors if a target wasn't specified
   # Warning Etc.nprocessors is restricted by CPU affinity
   def target_load
     $target_load || Etc.nprocessors
   end
 
   def cpu_load
-    File.read('/proc/loadavg').split(' ')[0].to_f
+    # Note: to_f ignores everything after the first float in the string
+    File.read('/proc/loadavg').to_f
   end
 
 end
