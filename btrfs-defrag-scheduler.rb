@@ -2159,12 +2159,21 @@ class BtrfsDev
   end
 
   def scan_status
-    adjustement = "q&l:%.2f" % queue_speed_factor
+    speed_factor = queue_speed_factor
     delay_speedup = @rate_controller.speedup_due_to_scan_delay
-    adjustement += ",d:%.2f" % delay_speedup if delay_speedup >= 1.01
-    "%d/%.3fs (%.3fs expected, IO %.0f%%) adj %s %s" %
-      [ @rate_controller.slow_batch_size, @rate_controller.slow_batch_period,
-        average_batch_time, @checker.load * 100, adjustement,
+    adjustement = ""
+    # No need to display speed adjustements when there aren't any
+    if speed_factor <= 0.99 || delay_speedup >= 1.01
+      adjustement = "adj "
+      msgs = []
+      msgs << ("q&l:%.2f" % speed_factor) if speed_factor <= 0.99
+      msgs << ("d:%.2f" % delay_speedup) if delay_speedup >= 1.01
+      adjustement << msgs.join(',') << ' '
+    end
+    "%d/%.3fs (%.3fs expected, IO %.0f%%) %s%s" %
+      [ @rate_controller.current_batch_size,
+        @rate_controller.current_batch_period, average_batch_time,
+        @checker.load * 100, adjustement,
         @rate_controller.relative_scan_speed_description ]
   end
 
