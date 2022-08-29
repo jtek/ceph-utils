@@ -1912,15 +1912,16 @@ class BtrfsDev
     @already_processed = @recent = @queued = 0
     @slow_scan_thread = Thread.new do
       info("## Beginning files list updater thread for #{dir}")
-      slow_files_state_update(first_pass: true)
       loop do
-        defragment_extent_and_subvolume_trees if $defragment_trees
         slow_files_state_update
+        defragment_extent_and_subvolume_trees if $defragment_trees
       end
     end
     @fragmentation_updater_thread = Thread.new { @files_state.filefrag_loop }
     @perf_queue_thread = Thread.new { handle_perf_queue_progress }
 
+    # wait for init_pass_speed (@files_state.status relies on it)
+    sleep 1 while (@rate_controller && @rate_controller.current_batch_size).nil?
     @files_state.status_at = @slow_status_at = Time.now
 
     @runner = AsyncRunner.new(dirname)
@@ -2242,7 +2243,7 @@ class BtrfsDev
 
   class FilesStateRateController
     attr_accessor :target_stop_time, :considered
-    attr :slow_batch_size, :slow_batch_period
+    attr :current_batch_size, :current_batch_period
     include HashEntrySerializer
     include HumanFormat
     include Outputs
@@ -2257,7 +2258,9 @@ class BtrfsDev
       # Need to define default values until init_new_scan (some other threads
       # ask us about current rate status)
       @target_stop_time = Time.now + SLOW_SCAN_PERIOD
-      init_slow_batch_target
+      # Set sensible values (we can log these before the scan actually starts)
+      # will be appropriately computed again
+      init_pass_speed
     end
 
     def relative_scan_speed_description
@@ -2271,6 +2274,7 @@ class BtrfsDev
       end
     end
 
+    # Return a speed factor increase to compensate for past delays
     def speedup_due_to_scan_delay
       # Don't have useful data to set a target speed
       return 1 unless @filecount
@@ -2283,19 +2287,20 @@ class BtrfsDev
         SLOW_SCAN_MAX_SPEED_FACTOR ].min
     end
 
-    def set_slow_batch_target
-      @slow_batch_size, @slow_batch_period = slow_batch_target
+    def set_current_batch_target
+      @current_batch_size, @current_batch_period = speed_to_batch(current_speed)
     end
 
     def init_new_scan
+      @scan_start = Time.now
       if @pass == :first
         info("= #{@dev.dirname}: skipping #{@processed} files " \
              "in #{SLOW_SCAN_CATCHUP_WAIT}s")
         # Avoid IO load just after boot (see "--slow-start" option)
-        sleep SLOW_SCAN_CATCHUP_WAIT
+        @scan_start += SLOW_SCAN_CATCHUP_WAIT
         @pass = :non_first
       end
-      @scan_start = Time.now
+      this_start = @scan_start
       # If we have to skip some files, skip the corresponding time period
       if @filecount && @filecount > 0 && @processed > 0
         # compute an approximate time start from the work already done
@@ -2308,13 +2313,14 @@ class BtrfsDev
         @scan_start -= adjustement
       end
       @target_stop_time = @scan_start + SLOW_SCAN_PERIOD
+      init_pass_speed
+      delay_until this_start
       @last_slow_scan_batch_start = Time.now
-      init_slow_batch_target
     end
 
     def wait_next_slow_scan_pass
       update_filecount(processed: considered)
-      delay_until(@last_slow_scan_batch_start + @slow_batch_period)
+      delay_until(@last_slow_scan_batch_start + @current_batch_period)
       @last_slow_scan_batch_start = Time.now
     end
 
@@ -2323,8 +2329,6 @@ class BtrfsDev
       return true if considered < @processed
 
       info "= #{@dev.dirname}: caught up #{@processed} files"
-      # Adjust slow scan start to avoid speed increases
-      @last_slow_scan_batch_start = Time.now
       @caught_up = true
       false
     end
@@ -2373,23 +2377,16 @@ class BtrfsDev
 
     private
 
-    def slow_batch_target
-      # If there isn't enough time or data, speed up
-      time_left = scan_time_left # cache it to avoid future negative values
-      return catching_up_batch_target(time_left: time_left) if time_left <= 0
-
-      # Maintain cruising speed if expected files are found and have time left
-      left = slow_scan_expected_left
-      return pass_batch_with_speed_factor if left <= 0
-
-      # If we don't know the filesystem yet make a fast first pass
+    def current_speed
+      # Make a fast first pass if we don't know the filesystem yet
       # (rework for large and busy filesystems ?)
-      unless @filecount
-        return [ MAX_FILES_BATCH_SIZE, MIN_DELAY_BETWEEN_FILEFRAGS ]
-      end
+      return max_speed * @dev.queue_speed_factor unless @filecount
+
+      # If there isn't enough time or data, speed up
+      return catching_up_speed if Time.now > @target_stop_time
 
       ## Adaptive speed during normal scan
-      batch_target_for(files_left: left, time_left: time_left)
+      @pass_target_speed * @dev.queue_speed_factor * speedup_due_to_scan_delay
     end
 
     def serialize_filecount
@@ -2415,7 +2412,7 @@ class BtrfsDev
     end
 
     # Called if @processed > @filecount, processing accelerates exponentially
-    # after @filecount (see catching_up_batch_target) we reproduce it there
+    # after @filecount (see catching_up_speed) we reproduce it there
     # and scale back the acceleration (to avoid too much scan IO after restart)
     def time_exceeded_for_processed
       increments = 0
@@ -2433,65 +2430,38 @@ class BtrfsDev
     end
 
     def max_speed
-      MAX_FILES_BATCH_SIZE / MIN_DELAY_BETWEEN_FILEFRAGS
+      MAX_FILES_BATCH_SIZE.to_f / MIN_DELAY_BETWEEN_FILEFRAGS
     end
 
-    def slow_scan_expected_left
-      expected_filecount - @processed
-    end
-
-    def init_slow_batch_target
+    def init_pass_speed
       @speed_increases = 0
       @considered = 0
-      params = { files_left: expected_filecount,
-                 time_left: SLOW_SCAN_PERIOD }
-      @pass_target_speed =
-        scan_speed_target(**params.merge(ignore_speed_factor: true))
-      @slow_batch_size, @slow_batch_period = batch_target_for(**params)
+      @pass_target_speed = expected_filecount.to_f / SLOW_SCAN_PERIOD
+      @current_batch_size, @current_batch_period =
+                           speed_to_batch(@pass_target_speed)
     end
 
-    def pass_batch_with_speed_factor
-      speed_to_batch(speed: @pass_target_speed * @dev.queue_speed_factor)
-    end
-
-    def catching_up_batch_target(time_left:)
+    # When we have exceeded the scan time, speedup exponentially with time
+    # use the queue_speed_factor to slow down temporarily when needed
+    def catching_up_speed
+      overshoot = Time.now - @target_stop_time
       speedup = false
-      while @speed_increases < (-time_left / filefrag_speed_increase_period)
+      while @speed_increases < (overshoot / scan_speed_increase_period)
         @speed_increases += 1
         # We increase the speed by SLOW_SCAN_SPEED_INCREASE_STEP each time
         speedup = true
       end
-      adjusted_speed = SLOW_SCAN_SPEED_INCREASE_STEP ** @speed_increases
+      adjustment = SLOW_SCAN_SPEED_INCREASE_STEP ** @speed_increases
       if speedup
         info("= #{@dev.dirname}: speedup scan to catch up (x%.2f) for next %s" %
-             [ adjusted_speed, human_duration(filefrag_speed_increase_period) ])
+             [ adjustment, human_duration(scan_speed_increase_period) ])
       end
       # Base the speed on the pass target speed computed at the pass beginning
-      speed = adjusted_speed * @pass_target_speed * @dev.queue_speed_factor
-      speed_to_batch(speed: speed)
+      @pass_target_speed * adjustement * @dev.queue_speed_factor
     end
 
-    # Only makes sense for and supports time_left > 0 and files_left >= 0
-    def batch_target_for(files_left:, time_left:)
-      scan_rate =
-        scan_speed_target(files_left: files_left, time_left: time_left)
-      # Limit rate to avoid large speed ups at end of batch to compensate
-      # for earlier slowdowns (the speed will go up later with @speed_increases)
-      scan_rate =
-        [ scan_rate, @pass_target_speed * SLOW_SCAN_MAX_SPEED_FACTOR ].min
-      # Accelerate when we are lagging behind our schedule
-      scan_rate *= speedup_due_to_scan_delay
-      speed_to_batch(speed: scan_rate)
-    end
-
-    def scan_speed_target(files_left:, time_left:, ignore_speed_factor: false)
-      base = files_left / time_left.to_f
-      return base if ignore_speed_factor
-
-      base * @dev.queue_speed_factor
-    end
-
-    def speed_to_batch(speed:)
+    # Compute a size,delay enforcing available ranges and preferring low sizes
+    def speed_to_batch(speed)
       batch_size =
         [ [ (MIN_DELAY_BETWEEN_FILEFRAGS * speed).ceil,
             MIN_FILES_BATCH_SIZE ].max, MAX_FILES_BATCH_SIZE ].min
@@ -2515,19 +2485,17 @@ class BtrfsDev
       steps_needed = logratio / logstep
       @scan_speed_increase_period = (SLOW_SCAN_PERIOD / 2) / steps_needed
     end
-
   end
 
   # Slowly update files, targeting a SLOW_SCAN_PERIOD period for all updates
-  def slow_files_state_update(first_pass: false)
+  def slow_files_state_update
     @rate_controller.init_new_scan
     @already_processed = @recent = @queued = 0
-    @last_slow_scan_batch_start = Time.now
-    @batch = Batch.new(batch_size: @rate_controller.slow_batch_size) do
+    @batch = Batch.new(batch_size: @rate_controller.current_batch_size) do
       queue_slow_scan_batch
-      @rate_controller.set_slow_batch_target
+      @rate_controller.set_current_batch_target
       @rate_controller.wait_next_slow_scan_pass
-      @rate_controller.slow_batch_size
+      @rate_controller.current_batch_size
     end
     begin
       Find.find(dir) do |path|
@@ -2662,7 +2630,7 @@ class BtrfsDev
   end
 
   def average_batch_time
-    @average_file_time[:not_cached] * @rate_controller.slow_batch_size
+    @average_file_time[:not_cached] * @rate_controller.current_batch_size
   end
 
   def slow_status
