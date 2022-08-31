@@ -2245,7 +2245,7 @@ class BtrfsDev
 
     private
 
-    def reset(batch_size:)
+    def reset
       @filelist = []
       @arg_length = 0
       @ignored = 0
