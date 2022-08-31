@@ -568,6 +568,13 @@ module HashEntrySerializer
 end
 
 module HumanFormat
+  DELAY_MAPS = { 24 * 3600 => "d",
+                 3600      => "h",
+                 60        => "m",
+                 1         => "s",
+                 0.001     => "ms",
+                 nil       => "now" }
+
   def human_size(size)
     suffixes = [ "B", "kiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB" ]
     prefix = size.to_f
@@ -586,13 +593,7 @@ module HumanFormat
   end
 
   def human_duration(duration)
-    delay_maps = { 24 * 3600 => "d",
-                   3600      => "h",
-                   60        => "m",
-                   1         => "s",
-                   0.001     => "ms",
-                   nil       => "now" }
-    delay_maps.each do |amount, suffix|
+    DELAY_MAPS.each do |amount, suffix|
       return suffix unless amount
       return "%.1f%s" % [ duration / amount, suffix ] if duration >= amount
     end
@@ -2215,14 +2216,15 @@ class BtrfsDev
   end
 
   # This class handles batch processing, it expects
-  # an initial batch size, and a block to call when the batch is ready
-  # the block must return the new batch size
+  # - a FilesStateRateController (used for batch size),
+  # - a block taking a files list to call when the batch is ready
   class Batch
     attr_reader :filelist
 
-    def initialize(batch_size:, &block)
+    def initialize(rate_controller:, &block)
+      @rate_controller = rate_controller
       @block = block
-      reset(batch_size: batch_size)
+      reset
     end
 
     def add_ignored
@@ -2237,7 +2239,7 @@ class BtrfsDev
     end
 
     def ready?
-      ((@filelist.size + @ignored) >= @batch_size) ||
+      ((@filelist.size + @ignored) >= @rate_controller.current_batch_size) ||
         (@arg_length >= FILEFRAG_ARG_MAX)
     end
 
@@ -2247,14 +2249,15 @@ class BtrfsDev
       @filelist = []
       @arg_length = 0
       @ignored = 0
-      @batch_size = batch_size
     end
 
     def handle_full_batch
       return unless ready?
 
-      new_batch_size = @block.call
-      reset(batch_size: new_batch_size)
+      @block.call(filelist)
+      reset
+      @rate_controller.set_current_batch_target
+      @rate_controller.wait_next_slow_scan_pass
     end
   end
 
@@ -2495,8 +2498,8 @@ class BtrfsDev
       # This can't change, cache it
       return @scan_speed_increase_period if @scan_speed_increase_period
       max_speed_ratio =
-        (MAX_DELAY_BETWEEN_FILEFRAGS / MIN_DELAY_BETWEEN_FILEFRAGS) *
-        (MAX_FILES_BATCH_SIZE / MIN_FILES_BATCH_SIZE)
+        (MAX_DELAY_BETWEEN_FILEFRAGS.to_f / MIN_DELAY_BETWEEN_FILEFRAGS) *
+        (MAX_FILES_BATCH_SIZE.to_f / MIN_FILES_BATCH_SIZE)
       logstep = Math.log(SLOW_SCAN_SPEED_INCREASE_STEP)
       logratio = Math.log(max_speed_ratio)
       steps_needed = logratio / logstep
@@ -2508,12 +2511,9 @@ class BtrfsDev
   def slow_files_state_update
     @rate_controller.init_new_scan
     @already_processed = @recent = @queued = 0
-    @batch = Batch.new(batch_size: @rate_controller.current_batch_size) do
-      queue_slow_scan_batch
-      @rate_controller.set_current_batch_target
-      @rate_controller.wait_next_slow_scan_pass
-      @rate_controller.current_batch_size
-    end
+    @batch = Batch.new(rate_controller: @rate_controller) do |list|
+               queue_slow_scan_batch(list)
+             end
     begin
       Find.find(dir) do |path|
         (Find.prune; next) if prune?(path)
@@ -2532,7 +2532,7 @@ class BtrfsDev
         stat = begin
                  File::Stat.new(path)
                rescue => ex
-                 info "- #{@dirname} #{path} removed, #{ex.class}: #{ex.message}"
+                 info "- #{@dirname} #{path} removed, #{ex.class}: #{ex}"
                  next
                end
         # Only process file entries (File::Stat.new follows symlinks)
@@ -2565,7 +2565,7 @@ class BtrfsDev
       @rate_controller.target_stop_time = Time.now + MAX_DELAY_BETWEEN_FILEFRAGS
     end
     # Process remaining files to update
-    queue_slow_scan_batch
+    queue_slow_scan_batch(@batch.filelist)
     # Store the amount of files found
     @rate_controller.update_filecount_on_scan_end
     files_state_update_report
@@ -2640,9 +2640,9 @@ class BtrfsDev
     mount_line && mount_line.match(/\S+\s\S+\sbtrfs\s(\S+)/)[1]
   end
 
-  def queue_slow_scan_batch
+  def queue_slow_scan_batch(filelist)
     # Note: this tracks filefrag speed and adjust batch size/period
-    frags = FileFragmentation.create(@batch.filelist, self, cached: false)
+    frags = FileFragmentation.create(filelist, self, cached: false)
     @queued += @files_state.select_for_defragmentation(frags)
   end
 
