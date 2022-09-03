@@ -51,8 +51,8 @@ Recognized options:
 
 --threshold <value> (-w)
     minimum fragmentation cost needed to trigger defragmentation
-    cost: ratio of estimated read speed in fragmented state vs speed when
-          stored in one continuous zone
+    cost: slowdown ratio of estimated read speed in fragmented state vs speed
+          when stored in one continuous zone
     default: #{$defaults[:threshold]}
 
 --verbose (-v)
@@ -2173,17 +2173,17 @@ class BtrfsDev
     adjustement = ""
     # No need to display speed adjustements when there aren't any
     if speed_factor <= 0.99 || delay_speedup >= 1.01
-      adjustement = "adj "
+      adjustement = " adj "
       msgs = []
       msgs << ("q&l:%.2f" % speed_factor) if speed_factor <= 0.99
       msgs << ("d:%.2f" % delay_speedup) if delay_speedup >= 1.01
-      adjustement << msgs.join(',') << ' '
+      adjustement << msgs.join(',')
     end
     "%d/%.3fs (%.3fs expected, IO %.0f%%) %s%s" %
       [ @rate_controller.current_batch_size,
         @rate_controller.current_batch_period, average_batch_time,
-        @checker.load * 100, adjustement,
-        @rate_controller.relative_scan_speed_description ]
+        @checker.load * 100, @rate_controller.relative_scan_speed_description,
+        adjustement ]
   end
 
   def register_filefrag_speed(count:, time:, cached:)
