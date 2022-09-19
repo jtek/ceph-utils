@@ -2528,15 +2528,14 @@ class BtrfsDev
         # ignore files with unparsable names
         short_name = short_filename(path) rescue ""
         next if short_name == ""
-        next if File.symlink?(path)
         stat = begin
-                 File::Stat.new(path)
+                 File.lstat(path)
                rescue => ex
                  debug "- #{@dirname} #{path} removed, #{ex.class}: #{ex}"
                  next
                end
-        # Only process file entries (File::Stat.new follows symlinks)
-        next if !stat.file?
+        # Only process file entries
+        next unless stat.file?
         @rate_controller.considered += 1
 
         # Ignore recently processed files
