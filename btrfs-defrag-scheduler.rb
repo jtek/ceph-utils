@@ -1143,38 +1143,39 @@ class FilesState
   class FuzzyEventTracker
     include Outputs
 
-    # Must be 1, 2, 4 or 8 depending on the precision objective
-    # higher value can avoid temporary high spikes of queued files
-    BITS_PER_ENTRY = 8
     # Should be enough: we don't expect to defragment more than 1/s
     # there's an hardcoded limit of 24 in position_offset
     ENTRIES_INDEX_BITS = 16
     MAX_ENTRIES = 2 ** ENTRIES_INDEX_BITS
-    ENTRIES_PER_BYTE = 8 / BITS_PER_ENTRY
-    MAX_ENTRY_VALUE = (2 ** BITS_PER_ENTRY) - 1
+    ENTRIES_MASK = MAX_ENTRIES - 1
+    MAX_ENTRY_VALUE = 2 ** 8 - 1
     # How often a file is changing its hash data source to avoid colliding
     # with the same other files
     ROTATING_PERIOD = 7 * 24 * 3600 # one week
     # Split the objects in smaller groups that rotate independently
-    # to avoid spikes on rotations
-    ROTATE_GROUPS = 2 ** 16
-    ROTATE_SEGMENT = ROTATING_PERIOD.to_f / ROTATE_GROUPS
+    # to avoid spikes on rotations (this is chosen for a partial rotation
+    # occuring frequently : every 604800 / 65536 ~= 9 seconds which can't
+    # create large spikes)
+    # We use bits to choose them with a mask instead of a modulo (faster and
+    # in a heavily used code)
+    ROTATE_GROUP_BITS = 16
+    ROTATE_GROUPS = 2 ** ROTATE_GROUP_BITS
+    ROTATE_GROUP_MASK = ROTATE_GROUPS - 1
+    # We extract the entry from a subset of a 64 bit integer so can't ignore
+    # more than that
+    MAX_DIGEST_IGNORE_BITS = 64 - ENTRIES_INDEX_BITS
 
     attr_reader :size
 
     def initialize(serialized_data = nil)
-      @tick_interval =
-        IGNORE_AFTER_DEFRAG_DELAY.to_f / ((2 ** BITS_PER_ENTRY) - 1)
+      @tick_interval = IGNORE_AFTER_DEFRAG_DELAY.to_f / MAX_ENTRY_VALUE
       # Reset recent data if rules changed or invalid serialization format
       if !serialized_data || !serialized_data["ttl"] ||
          (serialized_data["ttl"] > IGNORE_AFTER_DEFRAG_DELAY) ||
-         (serialized_data["bits_per_entry"] != BITS_PER_ENTRY) ||
-         ((serialized_data["bitarray"].size * ENTRIES_PER_BYTE) != MAX_ENTRIES)
+         (serialized_data["bitarray"].size != MAX_ENTRIES)
         dump = serialized_data && serialized_data.reject{|k,v| k == "bitarray"}
         info "Invalid serialized data: \n#{dump.inspect}"
-        @bitarray =
-          "\0".force_encoding(Encoding::ASCII_8BIT) *
-          (MAX_ENTRIES / ENTRIES_PER_BYTE)
+        @bitarray = "\0".force_encoding(Encoding::ASCII_8BIT) * MAX_ENTRIES
         @last_tick = Time.now.to_f
         @size = 0
         return
@@ -1190,42 +1191,23 @@ class FilesState
     # Expects a string
     # set value to max in the entry (0 will indicate entry has expired)
     def event(object_id)
-      position, offset = position_offset(object_id)
+      position = object_position(object_id)
 
-      byte = @bitarray.getbyte(position)
-      nibbles = []
-      ENTRIES_PER_BYTE.times do
-        nibbles << (byte & MAX_ENTRY_VALUE)
-        byte = (byte >> BITS_PER_ENTRY)
-      end
-      previous_value = nibbles[offset]
-      nibbles[offset] = MAX_ENTRY_VALUE
-      nibbles.reverse_each do |value|
-        byte = (byte << BITS_PER_ENTRY)
-        byte += value
-      end
-      @bitarray.setbyte(position, byte)
+      previous_value = @bitarray.getbyte(position)
+      @bitarray.setbyte(position, MAX_ENTRY_VALUE)
       @size += 1 if previous_value == 0
     end
 
     def recent?(object_id)
-      position, offset = position_offset(object_id)
-      byte = @bitarray.getbyte(position)
-      offset.times { byte = (byte >> BITS_PER_ENTRY) }
-      data = (byte & MAX_ENTRY_VALUE)
-      data != 0
+      @bitarray.getbyte(object_position(object_id)) != 0
     end
 
     def serialization_data
-      {
-        # Dup is used for moving data because it isn't stored right away
+      { # Dup is used for moving data because it isn't stored right away
         # and @last_tick is reassigned while @bitarray is changed in place
-        # @bitarray.dup is enough Float#dup isn't supported by old Ruby versions
         "bitarray" => @bitarray.dup,
         "last_tick" => @last_tick,
-        "ttl" => IGNORE_AFTER_DEFRAG_DELAY,
-        "bits_per_entry" => BITS_PER_ENTRY
-      }
+        "ttl" => IGNORE_AFTER_DEFRAG_DELAY }
     end
 
     def tick_handler_for_async_runner
@@ -1234,7 +1216,7 @@ class FilesState
     end
 
     def next_tick_at
-      # Add a fration of a second to avoid being scheduled too soon
+      # Add a fraction of a second to avoid being scheduled too soon
       # should not be needed but costs almost nothing and clocks are tricky
       # AsyncRunner expects a Time object
       Time.at(@last_tick + @tick_interval + 0.001)
@@ -1243,16 +1225,8 @@ class FilesState
     private
 
     def compute_size
-      @size = 0
-      @bitarray.size.times do |byte_idx|
-        byte = @bitarray.getbyte(byte_idx)
-        next if byte == 0 # should be common
-        ENTRIES_PER_BYTE.times do
-          entry = byte & MAX_ENTRY_VALUE
-          @size += 1 if entry != 0
-          byte = (byte >> BITS_PER_ENTRY)
-        end
-      end
+      @size =
+        @bitarray.each_byte.reduce(0) { |sum, byte| byte == 0 ? sum : sum + 1 }
     end
 
     # Advance the clock and test for abnormal conditions
@@ -1276,42 +1250,48 @@ class FilesState
     def tick!
       @last_tick += @tick_interval
       return if @size == 0 # nothing to be done
+
+      # There is a chance of a race condition for @size:
+      # adding a new tracked event where there was none before it has been
+      # counted in the loop below will increase @size twice, this will be fixed
+      # on next tick! and is acceptable.
+      # the byte value can be decremented while a concurrent tracked event
+      # occurs ignoring the tracked event if it occurs between the bitarray read
+      # and the write for the same offset.
+      # This is extremely unlikely and thus acceptable too.
       @size = 0
-      @bitarray.size.times do |byte_idx|
-        byte = @bitarray.getbyte(byte_idx)
+      @bitarray.each_byte.with_index do |byte, idx|
         next if byte == 0 # should be common
-        nibbles = []
-        ENTRIES_PER_BYTE.times do
-          entry = byte & MAX_ENTRY_VALUE
-          entry = [ entry - 1, 0 ].max
-          nibbles << entry
-          byte = (byte >> BITS_PER_ENTRY)
-        end
-        nibbles.reverse_each do |value|
-          @size += 1 if value > 0
-          byte = (byte << BITS_PER_ENTRY)
-          byte += value
-        end
-        @bitarray.setbyte(byte_idx, byte)
+
+        @bitarray.setbyte(idx, byte - 1)
+        @size += 1 if byte > 1
       end
     end
 
-    # The actual position slowly changes (once every ROTATING_PERIOD)
-    def position_offset(object_id)
+    # The actual position for each object_id slowly changes over time
+    # to avoid the unavoidable collisions of the FuzzyEventTracker
+    # being fixed and preventing some files from being defragmented long-term.
+    # The time of change varies for each object_id to avoid all collisions to
+    # change at the same time, discovering many "hidden" fragmented files at
+    # once (which could generate large spikes of defragmentation activity).
+    def object_position(object_id)
+      # We assume 64 bits of the MD5 digest is enough information
+      # to avoid almost all collisions
       object_digest = Digest::MD5.digest(object_id)
-      verylong_int =
-        object_digest.unpack('N*').
-        each_with_index.map { |a, i| a * (2**32)**i }.inject(&:+)
-      # This distributes object_ids so that they don't rotate simultaneously
-      # which would create large spikes in new objects to defragment
-      rotating_offset = verylong_int & (ROTATE_GROUPS - 1)
-      rotation = ((Time.now.to_i + (rotating_offset * ROTATE_SEGMENT)) /
-                  ROTATING_PERIOD).to_i
-      # verylong_int is a 128 bit integer and we need to get 24 bits (3 bytes)
-      digest_offset = rotation % 104
-      # We get the position from 3 bytes (24 bits)
-      event_idx = ((verylong_int >> digest_offset) & 16777215) % MAX_ENTRIES
-      [ event_idx / ENTRIES_PER_BYTE, event_idx % ENTRIES_PER_BYTE ]
+      long_int, _long_int2 = object_digest.unpack('Q*')
+      # choose the rotating group using a portion of the digest
+      rotating_group = long_int & ROTATE_GROUP_MASK
+      # Rotation :
+      # - occurs every ROTATING_PERIOD
+      # - is offset by the rotating_group
+      rotation = ((Time.now.to_f / ROTATING_PERIOD) +
+                  (rotating_group.to_f / ROTATE_GROUPS)).to_i
+      # When rotating we use a different part of the digest by choosing
+      # the amount of bits we ignore between 0 and the maximum possible
+      # leaving enough data to cover MAX_ENTRIES
+      ignored_bits = rotation % MAX_DIGEST_IGNORE_BITS
+      # We get the final position by offsetting and selecting the low bits
+      (long_int >> ignored_bits) & ENTRIES_MASK
     end
   end
 
