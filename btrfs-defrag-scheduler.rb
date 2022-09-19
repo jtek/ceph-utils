@@ -2532,7 +2532,7 @@ class BtrfsDev
         stat = begin
                  File::Stat.new(path)
                rescue => ex
-                 info "- #{@dirname} #{path} removed, #{ex.class}: #{ex}"
+                 debug "- #{@dirname} #{path} removed, #{ex.class}: #{ex}"
                  next
                end
         # Only process file entries (File::Stat.new follows symlinks)
