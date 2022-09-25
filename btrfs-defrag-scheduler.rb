@@ -233,9 +233,7 @@ FILECOUNT_SERIALIZE_DELAY = $debug ? 10 : 600
 
 # How many files do we queue for defragmentation
 MAX_QUEUE_LENGTH = 2000
-# What is our target queue length proportion where our defragmentation rate
-# and scan rate are nominal
-# speed up defragmentation and slow down scan above it and inverse under it
+# Slow down slow_scan when the queue of files to defragment is above this level
 QUEUE_PROPORTION_EQUILIBRIUM = 0.05
 # How much device time the program is allowed to use (including filefrag calls)
 # time window => max_device_use_ratio
@@ -278,11 +276,11 @@ MAX_DELAY_BETWEEN_SLOW_SCANS = 120
 
 # These are used to compensate for deviation of the slow scan progress
 # If we lag, set a higher target speed up to this factor
-SLOW_SCAN_MAX_SPEED_FACTOR = 2
-# Speedup when the scheduler lags behind, rate linearly increase reaching 2x\
+SLOW_SCAN_MAX_SPEED_FACTOR = 4
+# Speedup when the scheduler lags behind, rate linearly increase reaching 2x
 # when the delay reaches this proportion of SLOW_SCAN_PERIOD
 # The actual speedup capped by the value of SLOW_SCAN_MAX_SPEED_FACTOR
-SLOW_SCAN_DOUBLE_SPEED_AT = 0.01
+SLOW_SCAN_MAX_SPEED_AT = 0.01
 # During high load (detected by defragmentation process not being able to keep
 # up) slow down up to this factor, high CPU load can push this further down
 SLOW_SCAN_MIN_SPEED_FACTOR = 0.02
@@ -291,10 +289,14 @@ SLOW_SCAN_MIN_SPEED_FACTOR = 0.02
 # don't make it so large that at cruising speed it could overflow the queue
 # with only one batch
 MAX_FILES_BATCH_SIZE = MAX_QUEUE_LENGTH / 4
-MIN_FILES_BATCH_SIZE = 1
 # Constraints on the delay between batches
 MIN_DELAY_BETWEEN_FILEFRAGS = 0.1
-MAX_DELAY_BETWEEN_FILEFRAGS = 120
+MAX_DELAY_BETWEEN_FILEFRAGS = 120.0
+# Target delay. Note that batching filefrags noticeably lower CPU usage,
+# this is high enough to get low CPU usage on FS with multi million files
+DEFAULT_DELAY_BETWEEN_FILEFRAGS = 1.0
+MAX_FILEFRAG_SPEED_WITH_DEFAULT_DELAY =
+  MAX_FILES_BATCH_SIZE / DEFAULT_DELAY_BETWEEN_FILEFRAGS
 
 # If the background thread consolidating writes can't be scheduled soon enough
 # we trigger an emergency consolidation to avoid slowing down more as
@@ -2283,7 +2285,8 @@ class BtrfsDev
       filecount_delay = target_considered - considered
       return 1 if filecount_delay <= 0
 
-      [ 1 + (filecount_delay / (SLOW_SCAN_DOUBLE_SPEED_AT * @filecount)),
+      [ 1 + (SLOW_SCAN_MAX_SPEED_FACTOR - 1) *
+            (filecount_delay / (SLOW_SCAN_MAX_SPEED_AT * @filecount)),
         SLOW_SCAN_MAX_SPEED_FACTOR ].min
     end
 
@@ -2460,16 +2463,24 @@ class BtrfsDev
       @pass_target_speed * adjustement * @dev.queue_speed_factor
     end
 
-    # Compute a size,delay enforcing available ranges and preferring low sizes
+    # Compute a [size,delay] for batches enforcing available ranges
+    # prefer batches of 1 if while batches occur less frequently than default
+    # delay between batches, then increase batch size, then reduce delay
     def speed_to_batch(speed)
-      batch_size =
-        [ [ (MIN_DELAY_BETWEEN_FILEFRAGS * speed).ceil,
-            MIN_FILES_BATCH_SIZE ].max, MAX_FILES_BATCH_SIZE ].min
-      # to_f avoids ZeroDivisionError
-      batch_period =
-        [ [ batch_size / speed.to_f,
-            MIN_DELAY_BETWEEN_FILEFRAGS ].max, MAX_DELAY_BETWEEN_FILEFRAGS ].min
-      [ batch_size, batch_period ]
+      # Speed is slow, use 1 for batch_size
+      if speed <= DEFAULT_DELAY_BETWEEN_FILEFRAGS
+        [ 1, [ 1 / speed, MAX_DELAY_BETWEEN_FILEFRAGS ].min ]
+      # Raise batch_size to match speed until it reaches MAX_FILES_BATCH_SIZE
+      elsif speed <= MAX_FILEFRAG_SPEED_WITH_DEFAULT_DELAY
+        # size must be an Integer
+        batch_size = (DEFAULT_DELAY_BETWEEN_FILEFRAGS * speed).ceil
+        # Adjust period to actual batch_size
+        [ batch_size, batch_size / speed ]
+      # Then lower period to match speed down to min allowable period
+      else
+        [ MAX_FILES_BATCH_SIZE,
+          [ MAX_FILES_BATCH_SIZE / speed, MIN_DELAY_BETWEEN_FILEFRAGS ].max ]
+      end
     end
 
     # We want to reach max filefrag speed in SLOW_BATCH_PERIOD / 2 if we spend
@@ -2479,7 +2490,7 @@ class BtrfsDev
       return @scan_speed_increase_period if @scan_speed_increase_period
       max_speed_ratio =
         (MAX_DELAY_BETWEEN_FILEFRAGS.to_f / MIN_DELAY_BETWEEN_FILEFRAGS) *
-        (MAX_FILES_BATCH_SIZE.to_f / MIN_FILES_BATCH_SIZE)
+        MAX_FILES_BATCH_SIZE.to_f
       logstep = Math.log(SLOW_SCAN_SPEED_INCREASE_STEP)
       logratio = Math.log(max_speed_ratio)
       steps_needed = logratio / logstep
