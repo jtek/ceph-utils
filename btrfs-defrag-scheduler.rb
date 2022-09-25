@@ -2070,6 +2070,7 @@ class BtrfsDev
   # Experimental, the impact of this isn't depicted in the BTRFS documentation
   # when defragmenting directories without -r we defragment additional
   # structures: extent and subvolume trees. Can destroy performance on HDD
+  # while running
   def defragment_extent_and_subvolume_trees
     # Defragment root subvolume
     verbose { " - #{dir}: root subvolume extent and subvolume trees" }
