@@ -428,9 +428,9 @@ class AsyncSerializer
   def initialize
     @store_tasks = {}
     @store_content = {}
-    @async_writer_thread = Thread.new { store_loop }
     # Serialization requests are pushed and poped in this queue
     @serialization_queue = Queue.new
+    @async_writer_thread = Thread.new { store_loop }
   end
 
   def serialize_entry(file, key, value)
