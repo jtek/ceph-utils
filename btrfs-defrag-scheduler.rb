@@ -1478,6 +1478,7 @@ class FilesState
     to_add_frags = {}
     @fragmentation_info_mutex.synchronize do
       # Process latest frags first (to allow ignoring older duplicates)
+      # note that currently callers don't provide duplicates
       file_fragmentations.reverse_each do |frag|
         shortname = frag.short_filename
         unless below_threshold_cost(frag)
@@ -1882,6 +1883,7 @@ class BtrfsDev
   def initialize(dir, dev_fs_map, fs_dev_map)
     @dir = dir
     @dir_slash = dir.end_with?("/") ? dir : "#{dir}/"
+    @range_excluding_dir_slash = @dir_slash.size..-1
     @dirname = File.basename(dir)
     @checker = UsagePolicyChecker.new(self)
     @files_state = FilesState.new(self)
@@ -2176,7 +2178,7 @@ class BtrfsDev
 
   # We prefer to store short filenames to free memory
   def short_filename(filename)
-    filename.gsub(@dir_slash, "")
+    filename[@range_excluding_dir_slash]
   end
   def full_filename(short_filename)
     "#{@dir_slash}#{short_filename}"
@@ -2512,8 +2514,9 @@ class BtrfsDev
     end
 
     # Compute a [size,delay] for batches enforcing available ranges
-    # prefer batches of 1 if while batches occur less frequently than default
-    # delay between batches, then increase batch size, then reduce delay
+    # prefer batches of 1 as long as batches occur less frequently than default
+    # delay between batches, then increase batch size (uses less CPU),
+    # then reduce delay
     def speed_to_batch(speed)
       # Speed is slow, use 1 for batch_size
       if speed <= DEFAULT_DELAY_BETWEEN_FILEFRAGS
@@ -2683,8 +2686,8 @@ class BtrfsDev
             3600 * defrag_rate ]
     if @files_state.last_queue_overflow_at &&
        (@files_state.last_queue_overflow_at > (now - SLOW_SCAN_PERIOD))
-      msg +=
-        " ovf: %ds ago" % (now - @files_state.last_queue_overflow_at).to_i
+      msg <<
+        (" ovf: %ds ago" % (now - @files_state.last_queue_overflow_at).to_i)
     end
     info msg
     # This handles large slowdowns and suspends without spamming the log
