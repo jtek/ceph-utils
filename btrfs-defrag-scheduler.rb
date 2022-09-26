@@ -260,8 +260,6 @@ STOPPED_WRITING_DELAY = 30
 # Some files might be written to constantly, don't delay passing them to
 # filefrag more than that
 MAX_WRITES_DELAY = 8 * 3600
-# How often do we check for defragmentation progress if there are none
-DEFAULT_PERF_QUEUE_INTERVAL = 20
 
 # Full refresh of fragmentation information on files happens in
 # (pass number of hours on commandline if the default is not optimal for you)
@@ -297,12 +295,6 @@ MAX_DELAY_BETWEEN_FILEFRAGS = 120.0
 DEFAULT_DELAY_BETWEEN_FILEFRAGS = 1.0
 MAX_FILEFRAG_SPEED_WITH_DEFAULT_DELAY =
   MAX_FILES_BATCH_SIZE / DEFAULT_DELAY_BETWEEN_FILEFRAGS
-
-# If the background thread consolidating writes can't be scheduled soon enough
-# we trigger an emergency consolidation to avoid slowing down more as
-# having a very large number of tracked written files slows the tracking itself
-EMERGENCY_WRITE_CONSOLIDATION_THRESHOLD =
-  MAX_TRACKED_WRITTEN_FILES + MAX_FILES_BATCH_SIZE
 
 # We ignore files recently defragmented for 12 hours
 IGNORE_AFTER_DEFRAG_DELAY = 12 * 3600
