@@ -322,6 +322,11 @@ MAX_FILEFRAG_QUEUE_SIZE = 1000
 # allow it to grow more
 MAX_PERF_QUEUE_SIZE = 500
 
+# We don't want to process files/directories in the same order on each pass
+# as it could prevent some files from being defragmented (easily defragmented
+# located after hard to defragment ones having raised the threshold)
+MAX_DIR_SIZE_FOR_SHUFFLE = 500
+
 # Where do we serialize our data
 STORE_DIR        = "/root/.btrfs_defrag"
 FILE_COUNT_STORE = "#{STORE_DIR}/filecounts.yml"
@@ -346,6 +351,56 @@ else
   end
 end
 $logger.level = $debug ? Logger::DEBUG : Logger::INFO
+
+# Redefine find to speed it up, simplify it and support random order
+# based on original Find.find code
+def Find.find_files(path)
+  block_given? or return enum_for(__method__, path)
+
+  fs_encoding = Encoding.find("filesystem")
+
+  raise Errno::ENOENT unless File.exist?(path)
+  path = path.dup # Not sure why original Find does it
+  path = path.to_path if path.respond_to? :to_path
+  enc = path.encoding == Encoding::US_ASCII ? fs_encoding : path.encoding
+  ps = [ path ]
+  while file = ps.shift
+    catch(:prune) do
+      begin
+        stat = File.lstat(file)
+      rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR, Errno::ELOOP,
+             Errno::ENAMETOOLONG
+        next
+      end
+      if stat.directory? then
+        begin
+          fs = Dir.entries(file, encoding: enc)
+        rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR, Errno::ELOOP,
+               Errno::ENAMETOOLONG
+          next
+        end
+        # Randomize order for small directories
+        fs.shuffle! if fs.size <= MAX_DIR_SIZE_FOR_SHUFFLE
+        # reverse will help see large dirs (not shuffled) progress
+        # otherwise not useful
+        fs.reverse_each do |f|
+          next if f == "." or f == ".."
+
+          f = File.join(file, f)
+          ps.unshift f.untaint
+        end
+      else
+        # Ignore non-files
+        next unless stat.file?
+        # A file small enough to fit a node can't be fragmented
+        next if stat.size <= 4096
+
+        yield file.dup.taint, stat
+      end
+    end
+  end
+  nil
+end
 
 module Outputs
   def error(msg)
@@ -2499,27 +2554,17 @@ class BtrfsDev
                queue_slow_scan_batch(list)
              end
     begin
-      Find.find(dir) do |path|
+      Find.find_files(dir) do |path, stat|
         (Find.prune; next) if prune?(path)
 
-        # Don't process during a resume (don't try to skip based
-        # on file type either to avoid IO load)
+        # Don't process during a resume
         if @rate_controller.catching_up?
           @rate_controller.considered += 1
           next
         end
 
-        # ignore files with unparsable names
-        short_name = short_filename(path) rescue ""
-        next if short_name == ""
-        stat = begin
-                 File.lstat(path)
-               rescue => ex
-                 debug "- #{@dirname} #{path} removed, #{ex.class}: #{ex}"
-                 next
-               end
+        short_name = short_filename(path)
         # Only process file entries
-        next unless stat.file?
         @rate_controller.considered += 1
 
         # Ignore recently processed files
@@ -2533,13 +2578,7 @@ class BtrfsDev
           @recent += 1; @batch.add_ignored
           next
         end
-        # A file small enough to fit a node can't be fragmented
-        # We don't count it as if nothing changes it won't become a target
-        if stat.size <= 4096
-          @rate_controller.considered -= 1
-        else
-          @batch.add_path(path)
-        end
+        @batch.add_path(path)
       end
     rescue => ex
       error("** Couldn't process #{dir}: " \
