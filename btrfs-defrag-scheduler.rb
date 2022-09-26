@@ -2666,6 +2666,8 @@ class BtrfsDev
   end
 
   def queue_slow_scan_batch(filelist)
+    # Files could have been deleted since found
+    filelist.select! { |path| File.lstat(path).file? rescue false }
     # Note: this tracks filefrag speed and adjust batch size/period
     frags = FileFragmentation.create(filelist, self, cached: false)
     @queued += @files_state.select_for_defragmentation(frags)
