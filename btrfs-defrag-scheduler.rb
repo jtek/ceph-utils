@@ -9,7 +9,6 @@ require 'pathname'
 require 'yaml'
 require 'fileutils'
 require 'singleton'
-require 'logger'
 require 'etc'
 
 $defaults = {
@@ -340,20 +339,21 @@ DEFAULT_COMMIT_DELAY = 30
 # Per filesystem defrag blacklist
 DEFRAG_BLACKLIST_FILE = ".no_defrag"
 
-$logger = Logger.new(STDOUT)
-if $log_timestamps
-  $logger.formatter = proc do |severity, datetime, progname, msg|
-    "%s: %s\n" % [ datetime.strftime("%Y%m%d %H%M%S"), msg ]
-  end
-else
-  $logger.formatter = proc do |severity, datetime, progname, msg|
-    "#{msg}\n"
+$logger_queue = Queue.new
+
+def format_msg(msg, datetime)
+  if $log_timestamps
+    "%s: %s" % [ datetime.strftime("%Y%m%d %H%M%S"), msg ]
+  else
+    msg
   end
 end
-$logger.level = $debug ? Logger::DEBUG : Logger::INFO
 
-# Redefine find to speed it up, simplify it and support random order
-# based on original Find.find code
+$logger_thread = Thread.new do
+  loop { puts format_msg(*$logger_queue.pop) }
+end
+
+# Based on Find.find: speed it up, simplify it and support random order
 def Find.find_files(path)
   block_given? or return enum_for(__method__, path)
 
@@ -404,24 +404,24 @@ end
 
 module Outputs
   def error(msg)
-    $logger.error msg
+    $logger_queue << [ msg, Time.now ]
   end
   def info(msg)
-    $logger.info msg
+    $logger_queue << [ msg, Time.now ]
   end
 
   # These support strings or blocks
   def debug(msg = nil)
-    return unless $logger.debug?
+    return unless $debug
 
     msg ||= (block_given? ? yield : nil)
-    $logger.debug msg
+    $logger_queue << [ msg, Time.now ]
   end
   def verbose(msg = nil)
     return unless $verbose
 
     msg ||= (block_given? ? yield : nil)
-    $logger.info msg
+    $logger_queue << [ msg, Time.now ]
   end
 end
 
@@ -3039,6 +3039,8 @@ class Main
   def flush_all_exit
     @devs.flush_and_stop_all
     AsyncSerializer.instance.stop_and_flush_all
+    $logger_thread.kill
+    puts format_msg(*$logger_queue.pop) while !$logger_queue.empty?
     exit
   end
 
