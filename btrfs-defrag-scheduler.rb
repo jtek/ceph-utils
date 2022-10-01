@@ -274,9 +274,9 @@ MAX_DELAY_BETWEEN_SLOW_SCANS = 120
 # These are used to compensate for deviation of the slow scan progress
 # If we lag, set a higher target speed up to this factor
 SLOW_SCAN_MAX_SPEED_FACTOR = 4
-# Speedup when the scheduler lags behind, rate linearly increase reaching 2x
+# Speedup when the scheduler lags behind, rate linearly increases with the delay
 # when the delay reaches this proportion of SLOW_SCAN_PERIOD
-# The actual speedup capped by the value of SLOW_SCAN_MAX_SPEED_FACTOR
+# it stops increasing having reached SLOW_SCAN_MAX_SPEED_FACTOR
 SLOW_SCAN_MAX_SPEED_AT = 0.01
 # During high load (detected by defragmentation process not being able to keep
 # up) slow down up to this factor, high CPU load can push this further down
@@ -324,7 +324,7 @@ MAX_PERF_QUEUE_SIZE = 500
 # We don't want to process files/directories in the same order on each pass
 # as it could prevent some files from being defragmented (easily defragmented
 # located after hard to defragment ones having raised the threshold)
-MAX_DIR_SIZE_FOR_SHUFFLE = 500
+MAX_DIR_SIZE_FOR_SHUFFLE = 10000 # shuffle should take <<1ms on modern hardware
 
 # Where do we serialize our data
 STORE_DIR        = "/root/.btrfs_defrag"
@@ -2464,24 +2464,6 @@ class BtrfsDev
       [ @filecount || (SLOW_SCAN_PERIOD * max_speed), 1 ].max
     end
 
-    # Called if @processed > @filecount, processing accelerates exponentially
-    # after @filecount (see catching_up_speed) we reproduce it there
-    # and scale back the acceleration (to avoid too much scan IO after restart)
-    def time_exceeded_for_processed
-      increments = 0
-      processed = 0
-      target = @processed - @filecount
-      loop do
-        processed += @pass_target_speed *
-                     (SLOW_SCAN_SPEED_INCREASE_STEP ** increments) *
-                     scan_speed_increase_period
-        break if processed > target
-        increments += 1
-      end
-      # Reduce the load artificially
-      (increments * scan_speed_increase_period) / 2
-    end
-
     def max_speed
       MAX_FILES_BATCH_SIZE.to_f / MIN_DELAY_BETWEEN_FILEFRAGS
     end
@@ -2584,8 +2566,7 @@ class BtrfsDev
         @batch.add_path(path)
       end
     rescue => ex
-      error("** Couldn't process #{dir}: " \
-            "#{ex}\n#{ex.backtrace.join("\n")}")
+      error("** Couldn't process #{dir}: #{ex}\n#{ex.backtrace.join("\n")}")
       # Don't wait for a SLOW_SCAN_PERIOD but don't create load either
       @rate_controller.target_stop_time = Time.now + MAX_DELAY_BETWEEN_FILEFRAGS
     end
