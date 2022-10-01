@@ -1979,6 +1979,10 @@ class BtrfsDev
                      time: @files_state.next_event_tracker_tick_at ) do
       @files_state.event_tracker_tick_handler_for_async_runner
     end
+    @runner.add_task(name: "serialize filecount") do
+      @rate_controller.serialize_filecount_if_needed
+      Time.now + FILECOUNT_SERIALIZE_DELAY
+    end
     @async_thread = Thread.new { @runner.run }
 
     @io_runner = AsyncRunner.new(dirname)
@@ -2304,7 +2308,6 @@ class BtrfsDev
 
     def initialize(dev:)
       @pass = :first
-      @caught_up = false
       @dev = dev
       load_filecount
       # Need to define default values until init_new_scan (some other threads
@@ -2347,67 +2350,34 @@ class BtrfsDev
     def init_new_scan
       @scan_start = Time.now
       if @pass == :first
-        info("= #{@dev.dirname}: skipping #{@processed} files " \
-             "in #{SLOW_SCAN_CATCHUP_WAIT}s")
         # Avoid IO load just after boot (see "--slow-start" option)
-        @scan_start += SLOW_SCAN_CATCHUP_WAIT
+        if SLOW_SCAN_CATCHUP_WAIT > 0
+          info("= #{@dev.dirname}: waiting #{SLOW_SCAN_CATCHUP_WAIT}s")
+          @scan_start += SLOW_SCAN_CATCHUP_WAIT
+        end
         @pass = :non_first
-      end
-      this_start = @scan_start
-      # If we have to skip some files, skip the corresponding time period
-      if @filecount && @filecount > 0 && @processed > 0
-        # compute an approximate time start from the work already done
-        adjustement = if @processed <= @filecount
-                        SLOW_SCAN_PERIOD * @processed.to_f / @filecount
-                      else
-                        # processing accelerates after @filecount
-                        SLOW_SCAN_PERIOD + time_exceeded_for_processed
-                      end
-        @scan_start -= adjustement
       end
       @target_stop_time = @scan_start + SLOW_SCAN_PERIOD
       init_pass_speed
-      delay_until this_start
+      delay_until @scan_start
       @last_slow_scan_batch_start = Time.now
     end
 
     def wait_next_slow_scan_pass
-      update_filecount(processed: considered)
       delay_until(@last_slow_scan_batch_start + @current_batch_period)
       @last_slow_scan_batch_start = Time.now
     end
 
-    def catching_up?
-      return false if @caught_up
-      return true if considered < @processed
+    def serialize_filecount_if_needed
+      # If we don't have a filecount yet, no need to update
+      return unless @filecount
 
-      info "= #{@dev.dirname}: caught up #{@processed} files"
-      @caught_up = true
-      false
+      serialize_filecount if considered > @filecount
     end
 
     def update_filecount_on_scan_end
-      update_filecount(processed: 0, total: considered)
-    end
-
-    def update_filecount(processed:, total: nil)
-      now = Time.now
-      @processed = processed
-      # Having a valid total is important (avoids a fast full scan on start)
-      # and happens infrequently
-      do_update = if (total && total != @filecount)
-                    true
-                  else
-                    !@last_filecount_updated_at ||
-                      (@last_filecount_updated_at <
-                       (now - FILECOUNT_SERIALIZE_DELAY))
-                  end
-      return unless do_update
-
-      @filecount = total || @filecount
+      @filecount = considered
       serialize_filecount
-      @last_filecount_updated_at = now
-      debug { "# #{@dev.dirname}, #{entry.inspect}" } if total
     end
 
     def wait_slow_scan_restart
@@ -2420,12 +2390,12 @@ class BtrfsDev
     def scan_time
       return 0 unless @scan_start
 
-      Time.now - @scan_start
+      [ Time.now - @scan_start, 0 ].max
     end
 
     def flush_all
       puts "= #{@dev.dirname}; flushing file count progress"
-      serialize_filecount
+      serialize_filecount_if_needed
     end
 
     private
@@ -2443,8 +2413,7 @@ class BtrfsDev
     end
 
     def serialize_filecount
-      entry = { processed: @processed, total: @filecount }
-      serialize_entry(FILE_COUNT_STORE, @dev.dir, entry)
+      serialize_entry(FILE_COUNT_STORE, @dev.dir, { total: considered })
     end
 
     def scan_time_left
@@ -2452,10 +2421,9 @@ class BtrfsDev
     end
 
     def load_filecount
-      default_value = { processed: 0, total: nil }
+      default_value = { total: nil }
       entry = unserialize_entry(FILE_COUNT_STORE, @dev.dir, "filecount",
                                 default_value)
-      @processed = entry[:processed]
       @filecount = entry[:total]
     end
 
@@ -2541,12 +2509,6 @@ class BtrfsDev
     begin
       Find.find_files(dir) do |path, stat|
         (Find.prune; next) if prune?(path)
-
-        # Don't process during a resume
-        if @rate_controller.catching_up?
-          @rate_controller.considered += 1
-          next
-        end
 
         short_name = short_filename(path)
         # Only process file entries
