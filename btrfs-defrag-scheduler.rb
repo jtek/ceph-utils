@@ -350,7 +350,10 @@ def format_msg(msg, datetime)
 end
 
 $logger_thread = Thread.new do
-  loop { puts format_msg(*$logger_queue.pop) }
+  loop do
+    STDOUT.puts format_msg(*$logger_queue.pop)
+    STDOUT.flush if $logger_queue.empty?
+  end
 end
 
 # Based on Find.find: speed it up, simplify it and support random order
