@@ -228,7 +228,7 @@ COST_THRESHOLD_TRUST_PERIOD = 1800       # 30 minutes
 COST_COMPUTE_DELAY = 60
 HISTORY_SERIALIZE_DELAY = $debug ? 10 : 3600
 RECENT_SERIALIZE_DELAY = $debug ? 10 : 1800
-FILECOUNT_SERIALIZE_DELAY = $debug ? 10 : 600
+FILECOUNT_SERIALIZE_DELAY = $debug ? 10 : 86400
 
 # How many files do we queue for defragmentation
 MAX_QUEUE_LENGTH = 2000
@@ -650,7 +650,6 @@ end
 
 # Class that handles running simple asynchronous tasks
 # each task is a block that returns the next tstamp it wants to run at
-# doesn't support running without a task
 class AsyncRunner
   include Outputs
   include Delaying
@@ -661,44 +660,74 @@ class AsyncRunner
   def initialize(name)
     @name = name
     @tasks = {}
-    @timings = {}
+    @next_task_id = 0
+    @runner = Thread.new { run }
+    @task_operation_queue = Queue.new
+    @task_id_mutex = Mutex.new
   end
 
-  def run
-    loop do
-      now = Time.now
-      @tasks.each do |block, params|
-        next if params[:run_at] > now
-
-        delay = now - params[:run_at]
-        start = now
-        @tasks[block][:run_at] = block.call
-        now = Time.now
-        record_timings(block, delayed: delay, runtime: now - start)
-      end
-      delay_until @tasks.values.map { |h| h[:run_at] }.min
-    end
-  end
-
+  # Returns a task id, usable to remove it later
   def add_task(name: "", time: Time.now, &block)
-    @tasks[block] = { run_at: time, name: name }
-    @timings[block] = { delayed: 0, runtime: 0 }
+    id = @task_id_mutex.synchronize { @next_task_id += 1; @next_task_id - 1 }
+    @task_operation_queue << [:add, id, { block: block, run_at: time,
+                                          name: name, delayed: 0, runtime: 0}]
+    id
+  end
+
+  def remove_task(id)
+    @task_operation_queue << [:del, id]
   end
 
   def dump_timings
-    @timings.each do |block, timings|
+    @tasks.each_value do |params|
+      # Interrupt handling: Outputs#info unavailable
       puts("++ %s, %s: delayed %.2f, runtime %.3f" %
-           [ @name, @tasks[block][:name], @timings[block][:delayed],
-             @timings[block][:runtime] ])
+           [ @name, params[:name], params[:delayed], params[:runtime] ])
     end
+  end
+
+  def kill
+    @runner.kill
   end
 
   private
 
-  def record_timings(block, delayed:, runtime:)
-    timings = @timings[block]
-    timings[:delayed] = memory_avg(timings[:delayed], TIMING_MEMORY, delayed)
-    timings[:runtime] = memory_avg(timings[:runtime], TIMING_MEMORY, runtime)
+  def run
+    loop do
+      now = Time.now
+      @tasks.each do |id, params|
+        next if params[:run_at] > now
+
+        delay = now - params[:run_at]
+        start = now
+        params[:run_at] = params[:block].call
+        now = Time.now
+        record_timings(id, delayed: delay, runtime: now - start)
+      end
+      process_queue
+      # Note: in case of no task, busy wait checking each second for tasks
+      delay_until (@tasks.values.map { |h| h[:run_at] }.min || (Time.now + 1))
+    end
+  end
+
+  def process_queue
+    until @task_operation_queue.empty?
+      op = @task_operation_queue.pop
+      case op[0]
+      when :add
+        @tasks[op[1]] = op[2]
+      when :del
+        @tasks.delete op[1]
+      else
+        raise "unknown AsyncRunner task operation '#{op.inspect}'"
+      end
+    end
+  end
+
+  def record_timings(id, delayed:, runtime:)
+    params = @tasks[id]
+    params[:delayed] = memory_avg(params[:delayed], TIMING_MEMORY, delayed)
+    params[:runtime] = memory_avg(params[:runtime], TIMING_MEMORY, runtime)
   end
 end
 
@@ -1375,6 +1404,7 @@ class FilesState
   end
 
   def flush_all
+    # Interrupt handling: Outputs#info unavailable
     puts "= #{@btrfs.dirname}; flushing cost history"
     _serialize_history
     puts "= #{@btrfs.dirname}; flushing recent defragmentations"
@@ -1879,11 +1909,13 @@ class BtrfsDev
   include AlgebraUtils
 
   # create the internal structures, including references to other mountpoints
-  def initialize(dir, dev_fs_map, fs_dev_map)
+  def initialize(dir, dev_fs_map, fs_dev_map, common_runner:)
     @dir = dir
     @dir_slash = dir.end_with?("/") ? dir : "#{dir}/"
     @range_excluding_dir_slash = @dir_slash.size..-1
     @dirname = File.basename(dir)
+    @common_runner = common_runner
+    @runner_task_ids = []
     @checker = UsagePolicyChecker.new(self)
     @files_state = FilesState.new(self)
     # Note: @files_state MUST be created before @rate_controller
@@ -1962,29 +1994,40 @@ class BtrfsDev
     # wait for init_pass_speed (@files_state.status relies on it)
     sleep 1 while (@rate_controller && @rate_controller.current_batch_size).nil?
     @files_state.status_at = @slow_status_at = Time.now
+    create_async_tasks
+  end
 
-    @runner = AsyncRunner.new(dirname)
-    @runner.add_task(name: "slow scan status") { slow_status }
-    @runner.add_task(name: "status") { @files_state.status }
-    @runner.add_task(name: "fragmentation thresholds") do
+  def create_async_tasks
+    @runner_task_ids <<
+      @common_runner.add_task(name: "#{dirname} slow scan status") do
+      slow_status
+    end
+    @runner_task_ids <<
+      @common_runner.add_task(name: "#{dirname} status") { @files_state.status }
+    @runner_task_ids <<
+      @common_runner.add_task(name: "#{dirname} fragmentation thresholds") do
       @files_state.compute_thresholds
       Time.now + COST_COMPUTE_DELAY
     end
-    @runner.add_task(name: "usage policy checker cleanup") do
+    @runner_task_ids <<
+      @common_runner.add_task(name: "#{dirname} usage policy checks cleanup") do
       @checker.cleanup
       Time.now + DEVICE_LOAD_WINDOW
     end
-    @runner.add_task(name: "fuzzy event tracker ticks",
-                     time: @files_state.next_event_tracker_tick_at ) do
+    @runner_task_ids <<
+      @common_runner.add_task(name: "#{dirname} fuzzy event tracker ticks",
+                              time: @files_state.next_event_tracker_tick_at ) do
       @files_state.event_tracker_tick_handler_for_async_runner
     end
-    @runner.add_task(name: "serialize filecount") do
+    @runner_task_ids <<
+      @common_runner.add_task(name: "#{dirname} serialize filecount") do
       @rate_controller.serialize_filecount_if_needed
-      Time.now + FILECOUNT_SERIALIZE_DELAY
+      @rate_controller.next_filecount_serialization_at
     end
-    @async_thread = Thread.new { @runner.run }
 
-    @io_runner = AsyncRunner.new(dirname)
+    # We create a dedicated AsyncRunner as these tasks are supposed to run
+    # concurrently with other BtrfsDev's ones
+    @io_runner = AsyncRunner.new("#{dirname} IO")
     @io_runner.add_task(name: "defragmenter") do
       defrag!
       available_for_defrag_at
@@ -1992,23 +2035,24 @@ class BtrfsDev
     @io_runner.add_task(name: "consolidate_writes") do
       @files_state.consolidate_writes
     end
-    @io_async_thread = Thread.new { @io_runner.run }
   end
 
   def stop_processing
     # This is the right time to store our state
     flush_all
-    [ @slow_scan_thread, @async_thread, @io_async_thread, @perf_queue_thread,
+    [ @slow_scan_thread, @perf_queue_thread,
       @fragmentation_updater_thread ].each do |thread|
       Thread.kill(thread) if thread
     end
+    @io_runner.kill
     @io_runner = nil
-    @runner = nil
+    while task_id = @runner_task_ids.shift
+      @common_runner.remove_task(task_id)
+    end
   end
 
   def dump_timings
-    # compact to handle stopped case
-    [ @io_runner, @runner ].compact.each(&:dump_timings)
+    @io_runner.dump_timings if @io_runner
   end
 
   def has_dev?(dev_id)
@@ -2245,12 +2289,14 @@ class BtrfsDev
 
     def add_ignored
       @ignored += 1
+      @rate_controller.considered += 1
       handle_full_batch
     end
 
     def add_path(path)
       @filelist << path
       @arg_length += (path.size + 1) # count space
+      @rate_controller.considered += 1
       handle_full_batch
     end
 
@@ -2355,6 +2401,18 @@ class BtrfsDev
       serialize_filecount if considered > @filecount
     end
 
+    # Adaptive wait: more frequently if we are raising an existing @filecount
+    def next_filecount_serialization_at
+      delay = if @filecount && considered > @filecount
+                FILECOUNT_SERIALIZE_DELAY
+              else
+                # This can overshoot on first pass but this isn't a problem:
+                # we serialize on scan_end and next pass should be ok
+                [ scan_time_left, FILECOUNT_SERIALIZE_DELAY ].max
+              end
+      Time.now + delay
+    end
+
     def update_filecount_on_scan_end
       @filecount = considered
       serialize_filecount
@@ -2374,6 +2432,7 @@ class BtrfsDev
     end
 
     def flush_all
+      # Interrupt handling: Outputs#info unavailable
       puts "= #{@dev.dirname}; flushing file count progress"
       serialize_filecount_if_needed
     end
@@ -2491,21 +2550,17 @@ class BtrfsDev
         (Find.prune; next) if prune?(path)
 
         short_name = short_filename(path)
-        # Only process file entries
-        @rate_controller.considered += 1
 
         # Ignore recently processed files
         if @files_state.recently_defragmented?(short_name)
           @already_processed += 1
           @batch.add_ignored
-          next
-        end
         # Ignore tracked files
-        if @files_state.tracking_writes?(short_name)
+        elsif @files_state.tracking_writes?(short_name)
           @recent += 1; @batch.add_ignored
-          next
+        else
+          @batch.add_path(path)
         end
-        @batch.add_path(path)
       end
     rescue => ex
       error("** Couldn't process #{dir}: #{ex}\n#{ex.backtrace.join("\n")}")
@@ -2743,11 +2798,11 @@ end
 class BtrfsDevs
   include Outputs
 
-  def initialize
+  def initialize(async_runner:)
     @btrfs_devs = []
-    @new_fs = false
     # Used to find which dev handles which tree
     @dev_tree = {}
+    @async_runner = async_runner
   end
 
   def flush_and_stop_all
@@ -2755,6 +2810,7 @@ class BtrfsDevs
   end
 
   def dump_timings
+    @async_runner.dump_timings
     @btrfs_devs.each(&:dump_timings)
   end
 
@@ -2764,7 +2820,6 @@ class BtrfsDevs
     loop do
       info("= (Re-)starting global fatrace thread")
       begin
-        next_popen_at = Time.now + FATRACE_TTL
         IO.popen(cmd) do |io|
           begin
             while line = io.gets do
@@ -2777,11 +2832,7 @@ class BtrfsDevs
               else
                 error "** Can't extract file from '#{line}'"
               end
-              # TODO: Maybe don't check on each pass (benchmark this)
-              break if Time.now > next_popen_at
-              # Fatrace should be able to detect writes on newly mounted fs
-              # that said bugs where encountered, so this forces a restart
-              break if recent_new_fs?
+              break if @restart_fatrace
             end
           rescue => ex
             msg = "#{ex}\n#{ex.backtrace.join("\n")}"
@@ -2835,13 +2886,15 @@ class BtrfsDevs
     # Detect remount -o compress=... events and (no)autodefrag
     still_mounted.each { |dev| dev.detect_options(dev_fs_map, fs_dev_map) }
     newly_mounted = []
+    fatrace_restart_needed = false
     dirs.map(&:first).each do |dir|
       next if known?(dir)
       next if still_mounted.map(&:dir).include?(dir)
       # More costly, tested last
       next unless top_volume?(dir)
-      newly_mounted << BtrfsDev.new(dir, dev_fs_map, fs_dev_map)
-      @new_fs = true if detect_new_fs
+      newly_mounted << BtrfsDev.new(dir, dev_fs_map, fs_dev_map,
+                                    common_runner: @async_runner)
+      fatrace_restart_needed = true if detect_new_fs
     end
     new_devs = still_mounted + newly_mounted
     # Longer devs first to avoid a top dir matching a file
@@ -2849,8 +2902,13 @@ class BtrfsDevs
     # new_devs.sort_by! { |dev| -dev.dir.size }
     @btrfs_devs = new_devs
     rebuild_dev_tree
+    trigger_fatrace_restart if fatrace_restart_needed
   end
 
+  def trigger_fatrace_restart
+    @restart_fatrace = true
+    @next_event_tracker_tick_at = Time.now + FATRACE_TTL
+  end
   # Note: there is a bug with this as it doesn't consider other types of
   # filesystems that could be mounted below a BTRFS mountpoint
   # it is probably a rare case and can be solved by adding entries for
@@ -2934,19 +2992,34 @@ class Main
     info "**********************************************"
     info "** Starting BTRFS defragmentation scheduler **"
     info "**********************************************"
-    @devs = BtrfsDevs.new
+    @common_runner = AsyncRunner.new("GlobalRunner")
+    @devs = BtrfsDevs.new(async_runner: @common_runner)
   end
 
   def run
     # don't launch fatrace until devs are all accounted for
     # as it would trigger a fatrace restart
     @devs.update!(detect_new_fs: false)
-    Thread.new { loop { sleep FS_DETECT_PERIOD; @devs.update! } }
+    @common_runner.add_task(name: "filesystem detection",
+                            time: Time.now + FS_DETECT_PERIOD) do
+      @devs.update!
+      Time.now + FS_DETECT_PERIOD
+    end
+    @next_fatrace_restart_at = Time.now + FATRACE_TTL
+    @common_runner.add_task(name: "fatrace restart",
+                            time: @next_fatrace_restart_at) do
+      if Time.now >= @next_fatrace_restart_at
+        trigger_fatrace_restart
+      else
+        @next_fatrace_restart_at
+      end
+    end
     @devs.fatrace_file_writes
   end
 
   def flush_all_exit
     @devs.flush_and_stop_all
+    @common_runner.kill
     AsyncSerializer.instance.stop_and_flush_all
     $logger_thread.kill
     puts format_msg(*$logger_queue.pop) while !$logger_queue.empty?
