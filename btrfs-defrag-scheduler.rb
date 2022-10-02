@@ -2047,27 +2047,8 @@ class BtrfsDev
     end
   end
 
-  def claim_file_write(filename)
-    # local_name: name in the main tree
-    # (fatrace could detect them in other mountpoints)
-    local_name = position_on_fs(filename)
-    return false unless local_name
-    @files_state.file_written_to(local_name) unless skip_defrag?(local_name)
-    true
-  end
-
   def handle_file_write(filename)
     @files_state.file_written_to(filename) unless skip_defrag?(filename)
-  end
-
-  def position_on_fs(filename)
-    return filename if filename.start_with?(@dir_slash)
-
-    subvol_fs = @fs_map.keys.find { |fs| filename.start_with?(fs) }
-    return nil unless subvol_fs
-
-    # This is a local file, triggered from another subdir, move in our domain
-    filename.gsub(subvol_fs, @fs_map[subvol_fs])
   end
 
   def each_fs_map
@@ -2917,20 +2898,6 @@ class BtrfsDevs
     return unless dev
     # Rewrite the file location if we have a map
     dev.handle_file_write(map ? file.gsub(path, map) : file)
-  end
-
-  # We keep the old code as it is faster for low dev numbers
-  # we might want to switch dynamically in future versions
-  def handle_file_write_old(file)
-    @btrfs_devs.find { |dev| dev.claim_file_write(file) }
-  end
-
-  # To call to detect a new fs being added to the watch list
-  def recent_new_fs?
-    # Using a copy and only resetting on true makes this thread-safe
-    copy = @new_fs
-    @new_fs = false if copy
-    copy
   end
 
   def top_volume?(dir)
