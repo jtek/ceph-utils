@@ -493,15 +493,11 @@ class AsyncSerializer
          (!@store_content[file][key].nil? ? "" : "default "))
     @store_content[file][key] ||= { last_write: Time.now.to_f,
                                     data: default_value }
-    entry = @store_content[file][key]
-    # Convert old timestamps to match new internals
-    if entry[:last_write].is_a?(Time)
-      entry[:last_write] = entry[:last_write].to_f
-    end
     @store_content[file][key][:data]
   end
 
   def stop_and_flush_all
+    # Interrupt handling: Outputs#info unavailable
     puts "= Storing state"
     Thread.kill @async_writer_thread
     # Killing the writer protects against concurrent writes
