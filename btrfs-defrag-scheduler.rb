@@ -1294,27 +1294,25 @@ class FilesState
     end
 
     # Advance the clock and test for abnormal conditions
-    # TODO: remove these tests later
     def advance_clock
       now = Time.now.to_f
-      if (@last_tick + @tick_interval) >= now
-        error "** FuzzyEventTracker early tick scheduling"
-        return
-      end
+      # Early calls happen on init and can happen if clock is not reliable
+      return if next_tick > now
 
       tick!
-      if (@last_tick + @tick_interval) < now
-        error "** FuzzyEventTracker missed some ticks:" \
-              "#{@last_tick + @tick_interval} < #{now}"
-      end
-      tick! while (@last_tick + @tick_interval) < now
+      return if next_tick > now
+
+      error "** FuzzyEventTracker missed some ticks:#{next_tick} < #{now}"
+      tick! while next_tick <= now
+    end
+
+    def next_tick
+      @last_tick + @tick_interval
     end
 
     def next_tick_at
-      # Add a fraction of a second to avoid being scheduled too soon
-      # should not be needed but costs almost nothing and clocks are tricky
-      # AsyncRunner expects a Time object
-      Time.at(@last_tick + @tick_interval + 0.001)
+      # We use floats but AsyncRunner expects Time objects
+      Time.at next_tick
     end
 
     private
@@ -2017,8 +2015,7 @@ class BtrfsDev
       Time.now + DEVICE_LOAD_WINDOW
     end
     @runner_task_ids <<
-      @common_runner.add_task(name: "#{dirname} fuzzy event tracker ticks",
-                              time: @files_state.next_event_tracker_tick_at ) do
+      @common_runner.add_task(name: "#{dirname} fuzzy event tracker ticks") do
       @files_state.event_tracker_tick_handler
       @files_state.next_event_tracker_tick_at
     end
