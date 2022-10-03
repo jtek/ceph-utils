@@ -695,18 +695,22 @@ class AsyncRunner
   def run
     loop do
       now = Time.now
+      next_run_at = nil
       @tasks.each do |id, params|
-        next if params[:run_at] > now
+        if params[:run_at] <= now
+          delay = now - params[:run_at]
+          start = now
+          params[:run_at] = params[:block].call
+          now = Time.now
+          record_timings(id, delayed: delay, runtime: now - start)
+        end
+        next if next_run_at && (params[:run_at] >= next_run_at)
 
-        delay = now - params[:run_at]
-        start = now
-        params[:run_at] = params[:block].call
-        now = Time.now
-        record_timings(id, delayed: delay, runtime: now - start)
+        next_run_at = params[:run_at]
       end
       process_queue
       # Note: in case of no task, busy wait checking each second for tasks
-      delay_until (@tasks.values.map { |h| h[:run_at] }.min || (Time.now + 1))
+      delay_until(next_run_at || (Time.now + 1))
     end
   end
 
@@ -1210,6 +1214,8 @@ class FilesState
 
   TYPES = [ :uncompressed, :compressed ]
   attr_reader :last_queue_overflow_at
+  attr_accessor :status_at
+
 
   # Track recent events using a compact bitarray indexed by hashes of objects
   # It isn't thread safe but in the event of a race condition
@@ -1287,25 +1293,6 @@ class FilesState
         "ttl" => IGNORE_AFTER_DEFRAG_DELAY }
     end
 
-    def tick_handler_for_async_runner
-      advance_clock
-      next_tick_at
-    end
-
-    def next_tick_at
-      # Add a fraction of a second to avoid being scheduled too soon
-      # should not be needed but costs almost nothing and clocks are tricky
-      # AsyncRunner expects a Time object
-      Time.at(@last_tick + @tick_interval + 0.001)
-    end
-
-    private
-
-    def compute_size
-      @size =
-        @bitarray.each_byte.reduce(0) { |sum, byte| byte == 0 ? sum : sum + 1 }
-    end
-
     # Advance the clock and test for abnormal conditions
     # TODO: remove these tests later
     def advance_clock
@@ -1321,6 +1308,20 @@ class FilesState
               "#{@last_tick + @tick_interval} < #{now}"
       end
       tick! while (@last_tick + @tick_interval) < now
+    end
+
+    def next_tick_at
+      # Add a fraction of a second to avoid being scheduled too soon
+      # should not be needed but costs almost nothing and clocks are tricky
+      # AsyncRunner expects a Time object
+      Time.at(@last_tick + @tick_interval + 0.001)
+    end
+
+    private
+
+    def compute_size
+      @size =
+        @bitarray.each_byte.reduce(0) { |sum, byte| byte == 0 ? sum : sum + 1 }
     end
 
     # Rewrite bitarray, decrementing each value and updating size
@@ -1397,10 +1398,6 @@ class FilesState
     @written_files = {}
     @writes_mutex = Mutex.new
     @to_filefrag = Queue.new
-  end
-
-  def status_at=(status_at)
-    @status_at = status_at
   end
 
   def flush_all
@@ -1630,7 +1627,6 @@ class FilesState
     end
     # Skip can happen (suspend for example)
     @status_at += STATUS_PERIOD while Time.now > @status_at
-    @status_at
   end
 
   def consolidate_writes
@@ -1756,8 +1752,8 @@ class FilesState
     @recently_defragmented.next_tick_at
   end
 
-  def event_tracker_tick_handler_for_async_runner
-    @recently_defragmented.tick_handler_for_async_runner
+  def event_tracker_tick_handler
+    @recently_defragmented.advance_clock
   end
 
   private
@@ -1993,7 +1989,9 @@ class BtrfsDev
 
     # wait for init_pass_speed (@files_state.status relies on it)
     sleep 1 while (@rate_controller && @rate_controller.current_batch_size).nil?
-    @files_state.status_at = @slow_status_at = Time.now
+    @slow_status_at = Time.now
+    # Avoids interlacing status in logs (both periods should be multiple of 60)
+    @files_state.status_at = @slow_status_at + 30
     create_async_tasks
   end
 
@@ -2001,9 +1999,13 @@ class BtrfsDev
     @runner_task_ids <<
       @common_runner.add_task(name: "#{dirname} slow scan status") do
       slow_status
+      @slow_status_at
     end
     @runner_task_ids <<
-      @common_runner.add_task(name: "#{dirname} status") { @files_state.status }
+      @common_runner.add_task(name: "#{dirname} status") do
+      @files_state.status
+      @files_state.status_at
+    end
     @runner_task_ids <<
       @common_runner.add_task(name: "#{dirname} fragmentation thresholds") do
       @files_state.compute_thresholds
@@ -2017,7 +2019,8 @@ class BtrfsDev
     @runner_task_ids <<
       @common_runner.add_task(name: "#{dirname} fuzzy event tracker ticks",
                               time: @files_state.next_event_tracker_tick_at ) do
-      @files_state.event_tracker_tick_handler_for_async_runner
+      @files_state.event_tracker_tick_handler
+      @files_state.next_event_tracker_tick_at
     end
     @runner_task_ids <<
       @common_runner.add_task(name: "#{dirname} serialize filecount") do
@@ -2672,7 +2675,6 @@ class BtrfsDev
     info msg
     # This handles large slowdowns and suspends without spamming the log
     @slow_status_at += SLOW_STATUS_PERIOD until @slow_status_at > now
-    @slow_status_at
   end
 
   def files_state_update_report
