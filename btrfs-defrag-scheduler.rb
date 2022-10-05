@@ -3008,7 +3008,7 @@ class Main
     @common_runner.add_task(name: "fatrace restart",
                             time: @next_fatrace_restart_at) do
       if Time.now >= @next_fatrace_restart_at
-        trigger_fatrace_restart
+        @devs.trigger_fatrace_restart
       else
         @next_fatrace_restart_at
       end
