@@ -2821,6 +2821,7 @@ class BtrfsDevs
       begin
         IO.popen(cmd) do |io|
           begin
+            @restart_fatrace = false
             while line = io.gets do
               # Skip btrfs commands (defrag mostly)
               next if line.start_with?("btrfs(")
@@ -2906,7 +2907,7 @@ class BtrfsDevs
 
   def trigger_fatrace_restart
     @restart_fatrace = true
-    @next_event_tracker_tick_at = Time.now + FATRACE_TTL
+    @next_fatrace_restart_at += FATRACE_TTL
   end
   # Note: there is a bug with this as it doesn't consider other types of
   # filesystems that could be mounted below a BTRFS mountpoint
