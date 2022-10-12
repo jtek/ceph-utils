@@ -310,7 +310,7 @@ FS_DETECT_PERIOD = $debug ? 10 : 300
 # some conditions (mounts or remounts, fatrace processes per mountpoint and
 # old fatrace version), it might not apply anymore but this doesn't put any
 # measurable load on the system and we are unlikely to miss files
-FATRACE_TTL = 24 * 3600 # every day
+FATRACE_TTL = $debug ? 10 : 24 * 3600 # every day
 
 # System dependent (reserve 100 for cmd and 4096 for one path entry)
 FILEFRAG_ARG_MAX = 131072 - 100 - 4096
@@ -877,7 +877,7 @@ class UsagePolicyChecker
   # Assumes passed block is a monotonic decreasing function
   # precision is used to limit the effort made to find the best value
   def dichotomy(range, target, precision)
-    start = Time.now if $debug
+    # start = Time.now if $debug
     min = range.min.to_f; max = range.max.to_f
     return min if yield(min) < target
     return max if yield(max) > target
@@ -892,8 +892,8 @@ class UsagePolicyChecker
       end
     end
     # We return the max to avoid the possibility of waiting twice
-    debug { "## dichotomy: %d steps, %.2fs, result: %.2fs" %
-            [ steps, (Time.now - start), max ] }
+    #debug { "## dichotomy: %d steps, %.2fs, result: %.2fs" %
+    #        [ steps, (Time.now - start), max ] }
     max
   end
 end
@@ -2795,6 +2795,8 @@ class BtrfsDev
 end
 
 class BtrfsDevs
+  attr_reader :next_fatrace_restart_at
+
   include Outputs
 
   def initialize(async_runner:)
@@ -2907,7 +2909,8 @@ class BtrfsDevs
 
   def trigger_fatrace_restart
     @restart_fatrace = true
-    @next_fatrace_restart_at += FATRACE_TTL
+    @next_fatrace_restart_at =
+      (@next_fatrace_restart_at || Time.now) + FATRACE_TTL
   end
   # Note: there is a bug with this as it doesn't consider other types of
   # filesystems that could be mounted below a BTRFS mountpoint
@@ -3005,14 +3008,12 @@ class Main
       @devs.update!
       Time.now + FS_DETECT_PERIOD
     end
-    @next_fatrace_restart_at = Time.now + FATRACE_TTL
     @common_runner.add_task(name: "fatrace restart",
-                            time: @next_fatrace_restart_at) do
-      if Time.now >= @next_fatrace_restart_at
+                            time: Time.now + FATRACE_TTL) do
+      if next_fatrace_restart_at.nil? || Time.now >= next_fatrace_restart_at
         @devs.trigger_fatrace_restart
-      else
-        @next_fatrace_restart_at
       end
+      next_fatrace_restart_at
     end
     @devs.fatrace_file_writes
   end
@@ -3028,6 +3029,10 @@ class Main
 
   def dump_timings
     @devs.dump_timings
+  end
+
+  def next_fatrace_restart_at
+    @devs.next_fatrace_restart_at
   end
 end
 
