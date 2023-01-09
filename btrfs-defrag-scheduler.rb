@@ -130,6 +130,7 @@ $log_timestamps = true
 $drive_count = $defaults[:drive_count]
 $extent_size = $defaults[:extent_size]
 $chunk_size = nil
+$btrfs_needs_quiet = false
 speed_multiplier = $defaults[:speed_multiplier]
 fragmentation_threshold = $defaults[:threshold]
 slow_start = $defaults[:slow_start]
@@ -1953,8 +1954,7 @@ class BtrfsDev
       @commit_delay = commit_delay
       info "= #{dir}: commit_delay is now #{@commit_delay}"
     end
-    # Reset defrag_cmd if something changed (will be computed on first access)
-    @defrag_cmd = nil if changed
+    reset_defrag_cmd if changed
 
     # Note: @autodefrag == nil or true means we weren't processing
     if autodefrag? && @autodefrag == false
@@ -2123,10 +2123,8 @@ class BtrfsDev
       next_chunk_size = $chunk_size
       defrag_time = file_frag.defrag_time
       loop do
-        run_with_device_usage do
-          system(*defrag_cmd, '-s', start.to_s, '-l', next_chunk_size.to_s,
-                 filename)
-        end
+        cmd = "#{defrag_cmd} -s #{start} -l #{next_chunk_size}"
+        _defrag(cmd, filename)
         start += $chunk_size
         break if start >= size
 
@@ -2139,9 +2137,27 @@ class BtrfsDev
                                        human_duration(Time.now - start_at) ]
       end
     else
-      run_with_device_usage { system(*defrag_cmd, filename) }
+      _defrag(defrag_cmd, filename)
     end
     queue_defragmentation_performance_check(file_frag)
+  end
+
+  def _defrag(cmd, filename)
+    run_with_device_usage do
+      output = `#{cmd} '#{filename}'`
+      output.chomp!
+      # Expected case
+      break if output.empty?
+
+      # Recent btrfs-progs need --quiet
+      if output == filename
+        # Store info for all devs
+        $btrfs_needs_quiet = true
+        reset_defrag_cmd
+      else
+        info "= #{dir}, #{filename} defrag output:\n#{output}"
+      end
+    end
   end
 
   # Experimental, the impact of this isn't depicted in the BTRFS documentation
@@ -2194,10 +2210,16 @@ class BtrfsDev
   # use -f to flush data (should allow more accurate disk usage stats)
   def defrag_cmd
     return @defrag_cmd if @defrag_cmd
-    cmd =
-      [ "btrfs", "filesystem", "defragment", "-t", $extent_size.to_s, "-f" ]
+
+    cmd = [ "btrfs" ]
+    cmd << '--quiet' if $btrfs_needs_quiet
+    cmd += [ "filesystem", "defragment", "-t", $extent_size.to_s, "-f" ]
     cmd << "-c#{comp_algo_param_value}" if @compression_algo
-    @defrag_cmd = cmd
+    @defrag_cmd = cmd.join(' ')
+  end
+
+  def reset_defrag_cmd
+    @defrag_cmd = nil
   end
 
   def comp_algo_param_value
