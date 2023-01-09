@@ -2789,13 +2789,12 @@ class BtrfsDev
 
   class << self
     def list_subvolumes(dir)
-      dir_slash = normalize_path_slash(dir)
       new_subdirs = []
       IO.popen([ "btrfs", "subvolume", "list", dir ]) do |io|
         while line = io.gets do
           line.chomp!
           if match = line.match(/^.* path (.*)$/)
-            new_subdirs << "#{dir_slash}#{match[1]}"
+            new_subdirs << File.join(dir, match[1])
           else
             error "** can't parse #{line}"
           end
