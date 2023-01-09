@@ -1922,6 +1922,8 @@ class BtrfsDev
 
     # Init filefrag time tracking and rate with sensible values
     @average_file_time = { cached: 0, not_cached: 0 }
+    # Needed by detect_options → update_subvol_dirs
+    @ro_subvols = []
     detect_options(dev_fs_map, fs_dev_map)
   end
 
@@ -2599,7 +2601,7 @@ class BtrfsDev
 
   # Prune read-only subvolumes or blacklisted paths
   def prune?(entry)
-    ro_subvol?(entry) || blacklisted?(entry)
+    in_ro_subvol?(entry) || blacklisted?(entry)
   end
 
   def skip_defrag?(filename)
@@ -2747,8 +2749,10 @@ class BtrfsDev
     filename.start_with?(*@no_defrag_list)
   end
 
-  def ro_subvol?(dir)
-    @ro_subvols_set.include?(dir)
+  # Note: an unknown bug allows the scan to enter old ro_subvol
+  # there's also the risk of entering a recent ro_subvol not yet detected
+  def in_ro_subvol?(dir)
+    @ro_subvols.any? { |vol| (dir == vol) || dir.start_with?("#{vol}/") }
   end
 
   # This updates the subvolume list and tracks their mountpoints and
@@ -2756,7 +2760,16 @@ class BtrfsDev
   def update_subvol_dirs(dev_fs_map)
     subvol_dirs_list = BtrfsDev.subvolumes_by_writable(dir)
     @rw_subvols = subvol_dirs_list[true] || []
-    @ro_subvols_set = (subvol_dirs_list[false] || []).to_set
+    new_ro_subvols = subvol_dirs_list[false] || []
+    # @ro_subvols_set must already be a Set
+    if @ro_subvols != new_ro_subvols
+      removed = @ro_subvols - new_ro_subvols
+      added = new_ro_subvols - @ro_subvols
+      @ro_subvols = new_ro_subvols
+      info "= #{dir}: now has #{@ro_subvols.size} snapshots"
+      info "= #{dir}: new snapshots: #{added.inspect}" if added.any?
+      info "= #{dir}: removed snapshots: #{removed.inspect}" if removed.any?
+    end
 
     fs_map = {}
     dev_list = Set.new
