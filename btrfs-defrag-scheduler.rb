@@ -472,7 +472,9 @@ class AsyncSerializer
 
   MIN_COMMIT_DELAY = $debug ? 5 : 60      # 1 minute
   MAX_COMMIT_DELAY = $debug ? 30 : 300    # 5 minutes
-  MAX_AGE = $debug ? 3600 : 7 * 24 * 3600 # 1 week
+  # Must be larger than the largest store interval (usually filecount)
+  # which is 1 month for default filecount interval
+  MAX_AGE = $debug ? 3600 : 180 * 24 * 3600 # 6 months
   # This makes sure we don't wait more than needed
   LOOP_MAX_DELAY = MIN_COMMIT_DELAY
 
