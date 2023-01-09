@@ -358,7 +358,7 @@ $logger_thread = Thread.new do
 end
 
 # Based on Find.find: speed it up, simplify it and support random order
-def Find.find_files(path)
+def Find.process_files(path, directory_prune_block)
   block_given? or return enum_for(__method__, path)
 
   fs_encoding = Encoding.find("filesystem")
@@ -378,6 +378,7 @@ def Find.find_files(path)
       end
       if stat.directory? then
         begin
+          Find.prune if directory_prune_block.call(file)
           fs = Dir.entries(file, encoding: enc)
         rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR, Errno::ELOOP,
                Errno::ENAMETOOLONG
@@ -2572,7 +2573,12 @@ class BtrfsDev
                queue_slow_scan_batch(list)
              end
     begin
-      Find.find_files(dir) do |path, stat|
+      prune_block = Proc.new do |path|
+        next false unless prune?(path)
+        verbose(" = Ignoring path #{dir}: #{path}")
+        true
+      end
+      Find.process_files(dir, prune_block) do |path, stat|
         (Find.prune; next) if prune?(path)
 
         short_name = short_filename(path)
