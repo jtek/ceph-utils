@@ -378,7 +378,7 @@ def Find.process_files(path, directory_prune_block)
       end
       if stat.directory? then
         begin
-          Find.prune if directory_prune_block.call(file)
+          throw(:prune) if directory_prune_block.call(file)
           fs = Dir.entries(file, encoding: enc)
         rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR, Errno::ELOOP,
                Errno::ENAMETOOLONG
@@ -2579,8 +2579,6 @@ class BtrfsDev
         true
       end
       Find.process_files(dir, prune_block) do |path, stat|
-        (Find.prune; next) if prune?(path)
-
         short_name = short_filename(path)
 
         # Ignore recently processed files
