@@ -2526,7 +2526,7 @@ class BtrfsDev
              [ adjustment, human_duration(scan_speed_increase_period) ])
       end
       # Base the speed on the pass target speed computed at the pass beginning
-      @pass_target_speed * adjustement * @dev.queue_speed_factor
+      @pass_target_speed * adjustment * @dev.queue_speed_factor
     end
 
     # Compute a [size,delay] for batches enforcing available ranges
