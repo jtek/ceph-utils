@@ -2784,7 +2784,7 @@ class BtrfsDev
     fs_map = {}
     dev_list = Set.new
     # We may not have '/' terminated paths everywhere but we must use them
-    # for fast and accurate subpath detection/substitution in "position_on_fs"
+    # for fast and accurate subpath detection/substitution
     @rw_subvols.each do |subvol|
       full_path = normalize_path_slash(subvol)
       dev_id = File.stat(full_path).dev
@@ -2897,22 +2897,21 @@ class BtrfsDevs
   end
 
   def update!(detect_new_fs: true)
+    mounts = File.open("/proc/mounts", "r") do |f|
+      f.readlines.map { |line| line.split(' ') }
+    end
     # Enumerate BTRFS filesystems, build :
     # - a dir -> option_string map
-    dirs = File.open("/proc/mounts", "r") do |f|
-      f.readlines.map { |line| line.split(' ') }
-        .select { |ary| ary[2] == 'btrfs' }
-    end.map { |ary| [ ary[1], ary[3] ] }
+    dirs = mounts.select { |ary| ary[2] == 'btrfs' }
+                 .map { |ary| [ ary[1], ary[3] ] }
     # - a deviceid -> [ dir1, dir2, ...] map
     dev_fs_map = Hash.new { |hash, key| hash[key] = Set.new }
     dirs.each { |dir, _options| dev_fs_map[File.stat(dir).dev] << dir }
 
     # Build a mountpoint to dev map to detect nested mountpoints from
     # other devs to ignore
-    allmounts = File.open("/proc/mounts", "r") do |f|
-      f.readlines.map { |line| line.split(' ') }
-    end.map { |ary| ary[1] }
-    fs_dev_map = allmounts.map do |dir|
+    fs_dev_map = mounts.map do |ary|
+      dir = ary[1]
       # Note: rescue nil is for handling a case where root can't access
       # a mount point (seems like a mostly harmless bug with tmpfs)
       dev_id = File.stat(dir).dev rescue nil
