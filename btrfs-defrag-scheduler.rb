@@ -3000,7 +3000,11 @@ class BtrfsDevs
 
     return unless dev
     # Rewrite the file location if we have a map
-    dev.handle_file_write(map ? file.gsub(path, map) : file)
+    dev.handle_file_write(map ? remap_file(file, path, map) : file)
+  end
+
+  def remap_file(file, path, map)
+    "#{map}#{file[path.size..-1]}"
   end
 
   def top_volume?(dir)
