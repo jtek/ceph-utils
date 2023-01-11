@@ -2128,7 +2128,7 @@ class BtrfsDev
       next_chunk_size = $chunk_size
       defrag_time = file_frag.defrag_time
       loop do
-        cmd = "#{defrag_cmd} -s #{start} -l #{next_chunk_size}"
+        cmd = defrag_cmd + [ "-s", start.to_s, "-l", next_chunk_size.to_s ]
         _defrag(cmd, filename)
         start += $chunk_size
         break if start >= size
@@ -2149,7 +2149,10 @@ class BtrfsDev
 
   def _defrag(cmd, filename)
     run_with_device_usage do
-      output = `#{cmd} '#{filename}'`
+      output = ""
+      IO.popen(cmd + [ filename ]) do |io|
+        output << line while (line = io.gets)
+      end
       output.chomp!
       # Expected case
       break if output.empty?
@@ -2220,7 +2223,7 @@ class BtrfsDev
     cmd << '--quiet' if $btrfs_needs_quiet
     cmd += [ "filesystem", "defragment", "-t", $extent_size.to_s, "-f" ]
     cmd << "-c#{comp_algo_param_value}" if @compression_algo
-    @defrag_cmd = cmd.join(' ')
+    @defrag_cmd = cmd
   end
 
   def reset_defrag_cmd
