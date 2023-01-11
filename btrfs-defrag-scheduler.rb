@@ -164,6 +164,7 @@ opts.each do |opt,arg|
     $verbose = true
   when '--debug'
     $debug = true
+    $verbose = true
   when '--full-scan-time'
     scan_time = arg.to_f
     help_exit if scan_time < 0.05
@@ -311,7 +312,7 @@ FS_DETECT_PERIOD = $debug ? 10 : 300
 # some conditions (mounts or remounts, fatrace processes per mountpoint and
 # old fatrace version), it might not apply anymore but this doesn't put any
 # measurable load on the system and we are unlikely to miss files
-FATRACE_TTL = $debug ? 10 : 24 * 3600 # every day
+FATRACE_TTL = $debug ? 60 : 24 * 3600 # every day
 
 # System dependent (reserve 100 for cmd and 4096 for one path entry)
 FILEFRAG_ARG_MAX = 131072 - 100 - 4096
@@ -1033,7 +1034,7 @@ class FilefragParser
   end
 
   def buffer_dump
-    if !$debug && @buffer.size > 12
+    if @buffer.size > 12
       skipped = "  [... skipped #{@buffer.size - 10} lines ...]  "
       (@buffer[0..6] + [ skipped ] + @buffer[-3..-1]).join("\n")
     else
