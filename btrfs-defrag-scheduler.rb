@@ -2235,7 +2235,7 @@ class BtrfsDev
     @compression_algo.gsub(/:.*$/, '')
   end
 
-  # We prefer to store short filenames to free memory
+  # We prefer to store short filenames to limit memory usage
   def short_filename(filename)
     filename[@range_excluding_dir_slash]
   end
@@ -2861,7 +2861,7 @@ class BtrfsDevs
 
   def fatrace_file_writes
     cmd = [ "fatrace", "-f", "W" ]
-    extract_write_re = /\A[^(]+\([0-9]+\): [ORWC]+ (.*)\Z/
+    extract_write_re = /\A[^(]+\([0-9]+\): [ORWC]+ +(.*)\Z/
     loop do
       info("= (Re-)starting global fatrace thread")
       begin
