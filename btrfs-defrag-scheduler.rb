@@ -1954,10 +1954,10 @@ class BtrfsDev
         info "= #{dir}: compression disabled"
       end
     end
-    commit_delay = parse_commit_delay
-    if @commit_delay != commit_delay
+    new_commit_delay = parse_commit_delay
+    if @commit_delay != new_commit_delay
       changed = true
-      @commit_delay = commit_delay
+      @commit_delay = new_commit_delay
       info "= #{dir}: commit_delay is now #{@commit_delay}"
     end
     reset_defrag_cmd if changed
@@ -2637,11 +2637,13 @@ class BtrfsDev
 
   def compression_algorithm
     options = mount_options
-    return nil unless options
+    return unless options
+
     compress_option = options.split(',').detect do |option|
       option.start_with?("compress=", "compress-force=")
     end
-    return nil unless compress_option
+    return unless compress_option
+
     compress_option.split('=')[1]
   end
 
@@ -2649,13 +2651,14 @@ class BtrfsDev
     delay = nil
     options = mount_options
     return unless options
+
     options.split(',').each { |option|
       if option.match(/^commit=(\d+)/)
         delay = Regexp.last_match[1].to_i
         break
       end
     }
-    return delay || DEFAULT_COMMIT_DELAY
+    delay || DEFAULT_COMMIT_DELAY
   end
 
   # Reading /proc/mounts can sometime be long: avoid doing it too much
