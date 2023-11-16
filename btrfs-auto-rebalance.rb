@@ -1,12 +1,15 @@
 #!/usr/bin/ruby -w
 
-# Maximum free space wasted as percentage
-MAX_WASTED_RATIO = 0.3
-# Maximum unallocated space above which no check is needed
-# use large value to keep data packed on the fastest cylinders if possible
-UNALLOCATED_THRESHOLD_RATIO = 0.75
-# Target max waste when rebalancing (not much less than max_wasted)
-TARGET_WASTED_RATIO = 0.25
+# Maximum percentage of free space wasted (in allocation groups)
+# allow higher percentage when the filesystem fills up
+MAX_FREE_WASTED_RANGE = (0.2..1.0)
+# The actual target for wasted free space is dependant on the allocation
+# don't balance if below the range, scale objective according to allocation
+# at full allocation we allow 100% waste
+USED_RANGE_FOR_BALANCE = (0.33..1.0)
+# Target when rebalancing (not much less than free_wasted_threshold)
+TARGET_RATIO_FROM_THRESHOLD = 0.9
+
 MAX_FAILURES = 50
 MAX_REBALANCES = 100
 FLAPPING_LEVEL = 3
@@ -30,7 +33,10 @@ def filesystems
   IO.popen("mount") do |io|
     io.each_line do |line|
       if match = line.match(/^(.*) on (.*) type btrfs/)
-        mounts << [ match[1], match[2] ] unless mounts.map(&:first).include?(match[1])
+        # deduplicate
+        next if mounts.map(&:first).include?(match[1])
+
+        mounts << [ match[1], match[2] ]
       end
     end
   end
@@ -74,20 +80,31 @@ class Btrfs
 
   def rebalance_if_needed
     if rebalance_needed?
-      log_current_state
+      log_balance_start
       rebalance
+    else
+      log_current_state
     end
   rescue => ex
     log "rebalance error: #{ex}\n#{ex.backtrace.join("\n")}"
   end
 
-  def log_current_state
+  def log_balance_start
     log("#" * 80)
-    log "%s: #{@mountpoint} rebalance started" % Time.now.strftime("%Y/%m/%d %H:%M:%S")
-    log "waste %.2f%%" % (free_wasted * 100)
-    log "unallocated: #{@unallocated}"
-    log "ratio:       #{@ratio}"
-    log "free:        #{@free}"
+    log "%s: #{@mountpoint} rebalance started" %
+        Time.now.strftime("%Y/%m/%d %H:%M:%S")
+    log_current_state
+  end
+
+  def log_current_state
+    log "%s: #{@mountpoint} current allocation state" %
+        Time.now.strftime("%Y/%m/%d %H:%M:%S")
+    log "\tused_ratio:  %.2f%%" % (used_ratio * 100)
+    log "\twaste:       %.2f%%" % (free_wasted * 100)
+    log "\tthreshold:   %.2f%%" % (free_wasted_threshold * 100)
+    log "\tunallocated: #{@unallocated}"
+    log "\tdata_ratio:  #{@ratio}"
+    log "\tfree:        #{@free}"
   end
 
   def rebalance
@@ -97,7 +114,7 @@ class Btrfs
     successive_failures = 0
     count = 0
     usage_target = start_target
-    while (free_wasted > target_wasted) && (count < MAX_REBALANCES)
+    while (free_wasted > free_wasted_target) && (count < MAX_REBALANCES)
       if Time.now >= must_stop_at
         log "Time allocated spent, aborting"
 	Process.wait @balance_cancel_pid
@@ -120,7 +137,7 @@ class Btrfs
         usage_target -= 1
       else
         successive_failures = 0
-	step = [ [ ((free_wasted - target_wasted) * 100) * STEP_VS_WASTE,
+	step = [ [ ((free_wasted - free_wasted_target) * 100) * STEP_VS_WASTE,
 	            MIN_TARGET_STEP ].max,
 	         MAX_TARGET_STEP ].min.to_i
         usage_target = [ usage_target + step, 100 ].min
@@ -130,12 +147,13 @@ class Btrfs
         fail "flapping detected: #{FLAPPING_LEVEL} times at this usage level"
       end
     end
-    if free_wasted > target_wasted
-      log "#{target_wasted} not reached in #{MAX_REBALANCES} balance calls"
+    if free_wasted > free_wasted_target
+      log "#{free_target_wasted} not reached in #{MAX_REBALANCES} balance calls"
     end
   ensure
     kill_balance_cancel unless cancel_reached
-    log "%s: #{@mountpoint} rebalance stopped" % Time.now.strftime("%Y/%m/%d %H:%M:%S")
+    log "%s: #{@mountpoint} rebalance stopped" %
+        Time.now.strftime("%Y/%m/%d %H:%M:%S")
   end
 
   def must_stop_at
@@ -187,26 +205,31 @@ class Btrfs
   end
 
   def rebalance_needed?
-    (unallocated_ratio < UNALLOCATED_THRESHOLD_RATIO) && (free_wasted > max_wasted)
+    USED_RANGE_FOR_BALANCE.include?(used_ratio) &&
+      (free_wasted > free_wasted_threshold)
   end
 
   def free_wasted
     1 - (@unallocated.to_f / (@free * @ratio))
   end
-  def unallocated_ratio
-    @unallocated.to_f / @device_size
+  def used_ratio
+    (@device_size - (@free * @ratio)) / @device_size
   end
-  def max_wasted
-    MAX_WASTED_RATIO
+  def free_wasted_threshold
+    position =
+      (used_ratio - USED_RANGE_FOR_BALANCE.min) /
+      (USED_RANGE_FOR_BALANCE.max - USED_RANGE_FOR_BALANCE.min)
+    MAX_FREE_WASTED_RANGE.min +
+      position * (MAX_FREE_WASTED_RANGE.max - MAX_FREE_WASTED_RANGE.min)
   end
 
-  def target_wasted
-    TARGET_WASTED_RATIO
+  def free_wasted_target
+    free_wasted_threshold * TARGET_RATIO_FROM_THRESHOLD
   end
 
   # Try to guess best usage_target starting_point
   def start_target
-    ((1 - target_wasted) * 66).to_i
+    ((1 - free_wasted_target) * 66).to_i
   end
 end
 
