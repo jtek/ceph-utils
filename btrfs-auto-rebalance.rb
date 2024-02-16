@@ -1,12 +1,49 @@
 #!/usr/bin/ruby -w
 
+
+require 'optparse'
+
+@options = { min_waste_target: 0.2, min_used_for_balance: 0.33, verbose: true,
+            only_analyze: false, spread: nil }
+OptionParser.new do |opts|
+  opts.banner = <<EOS
+Usage: btrfs-auto-rebalance.rb [options]
+\twill balance filesytems until wasted allocation space (allocated
+\tbut not used vs total allocated) reaches a target or too much time passed
+EOS
+
+  opts.on("-v", "--[no-]verbose", "Run verbosely", TrueClass) do |v|
+    @options[:verbose] = v
+  end
+  opts.on("-u", "--min-used-for-balance MIN_SPACE_USED",
+          "process only if allocated space ratio is above ([0.0 .. 1.0], " \
+          "default: #{@options[:min_used_for_balance]})",
+          Float) do |v|
+    @options[:min_used_for_balance] = v
+  end
+  opts.on("-t", "--min-waste-target WASTE_TARGET",
+          "wasted space target (rises when filesystem fills up above " \
+          "--min-used-for-balance value, [0.0 .. 1.0], default: " \
+          "#{@options[:min_waste_target]})", Float) do |v|
+    @options[:min_waste_target] = v
+  end
+  opts.on("-a", "--analyze-only",
+          "Only compute waste spaces and display targets", TrueClass) do |v|
+    @options[:only_analyze] = v
+  end
+  opts.on("-s", "--spread SECONDS", "Sleep randomly up to this amount",
+          Integer) do |v|
+    @options[:spread] = v
+  end
+end.parse!
+
 # Maximum percentage of free space wasted (in allocation groups)
 # allow higher percentage when the filesystem fills up
-MAX_FREE_WASTED_RANGE = (0.2..1.0)
+MAX_FREE_WASTED_RANGE = (@options[:min_waste_target]..1.0)
 # The actual target for wasted free space is dependant on the allocation
 # don't balance if below the range, scale objective according to allocation
 # at full allocation we allow 100% waste
-USED_RANGE_FOR_BALANCE = (0.33..1.0)
+USED_RANGE_FOR_BALANCE = (@options[:min_used_for_balance]..1.0)
 # Target when rebalancing (not much less than free_wasted_threshold)
 TARGET_RATIO_FROM_THRESHOLD = 0.9
 
@@ -24,7 +61,7 @@ MAX_FS_TIME = 5400 # 90 minutes
 require 'open3'
 
 def log(msg)
-  puts msg
+  STDERR.puts msg
   IO.popen("logger -p user.notice --id=$$", "w+") { |io| io.puts(msg) }
 end
 
@@ -110,6 +147,7 @@ class Btrfs
   def rebalance
     @fs_start_time = Time.now
     cancel_reached = false
+    # Safeguard for long balances, will cancel a running balance if time expired
     fork_balance_cancel
     successive_failures = 0
     count = 0
@@ -167,9 +205,10 @@ class Btrfs
   end
 
   def fork_balance_cancel
-    # sleep a minimum of 10 seconds to let the balance begin
-    delay = [ (must_stop_at - Time.now).to_i, 10 ].max
-    @balance_cancel_pid = spawn("sleep #{delay + 1} && btrfs balance cancel #{@mountpoint} &>/dev/null")
+    # sleep a minimum of 10 seconds to let the balance process begin
+    delay = [ (must_stop_at - Time.now).to_i, 10 ].max + 1
+    silent_balance_cmd = "btrfs balance cancel #{@mountpoint} &>/dev/null"
+    @balance_cancel_pid = spawn("sleep #{delay} && #{silent_balance_cmd}")
   end
 
   def kill_balance_cancel
@@ -216,6 +255,8 @@ class Btrfs
     (@device_size - (@free * @ratio)) / @device_size
   end
   def free_wasted_threshold
+    return 1 if used_ratio < USED_RANGE_FOR_BALANCE.min
+
     position =
       (used_ratio - USED_RANGE_FOR_BALANCE.min) /
       (USED_RANGE_FOR_BALANCE.max - USED_RANGE_FOR_BALANCE.min)
@@ -238,8 +279,11 @@ def change_title(msg)
 end
 
 def delay
-  sleep_amount = (SPREAD * Random.rand).to_i
+  # Meant to run daily, by default don't overlap next run on following day
+  spread = (@options[:spread] || (24 * 3600 - MAX_TIME)).to_i
+  sleep_amount = (spread * Random.rand).to_i
   return unless sleep_amount > 0
+
   log "delaying for #{sleep_amount}"
   change_title("waiting until #{Time.now + sleep_amount}")
   sleep sleep_amount
@@ -265,9 +309,8 @@ def analyse_fs
   end
 end
 
-if ARGV[0] && ARGV[0] == "-a"
+if @options[:only_analyze]
   analyse_fs
 else
-  SPREAD = (ARGV[0] || (24 * 3600 - MAX_TIME)).to_i # Don't overlap next run
   rebalance_fs
 end
