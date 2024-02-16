@@ -833,12 +833,12 @@ class UsagePolicyChecker
   end
 
   def cleanup
-    this_start = Time.now
+    earliest_stop = Time.now - DEVICE_LOAD_WINDOW
     # Cleanup the device uses, remove everything ending before used window
     # work on a copy to avoid interfering with concurrent Enumerators
     new_device_uses = @device_uses.dup
     new_device_uses.shift while (first = new_device_uses.first) &&
-                                first[1] < (this_start - DEVICE_LOAD_WINDOW)
+                                (first[1] < earliest_stop)
     @device_uses = new_device_uses
   end
 
@@ -862,8 +862,8 @@ class UsagePolicyChecker
     now + delay
   end
 
-  # Return expected use ratio when reaching start given known past activity
-  # before start, and "future" activity (based on expected_time) after start
+  # Return expected ratio of window when waiting to start given known past
+  # activity, and "future" activity (based on expected_time)
   def use_ratio(now, wait, window, expected_time)
     start = now + wait - window
     time_spent = 0
