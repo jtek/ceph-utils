@@ -1,6 +1,5 @@
 #!/usr/bin/ruby -w
 
-
 require 'optparse'
 
 @options = { min_waste_target: 0.2, min_used_for_balance: 0.33, verbose: true,
@@ -98,10 +97,13 @@ class Btrfs
 
   def refresh_usage
     IO.popen("btrfs fi usage --raw '#{@mountpoint}'") do |io|
+      @device_slack = 0
       io.each_line do |line|
         case line
 	when /Device size:\s*(\d*)$/
 	  @device_size = Regexp.last_match[1].to_i
+	when /Device slack:\s*(\d*)$/
+	  @device_slack = Regexp.last_match[1].to_i
 	when /Device allocated:\s*(\d*)$/
 	  @allocated = Regexp.last_match[1].to_i
 	when /Device unallocated:\s*(\d*)$/
@@ -252,7 +254,10 @@ class Btrfs
     1 - (@unallocated.to_f / (@free * @ratio))
   end
   def used_ratio
-    (@device_size - (@free * @ratio)) / @device_size
+    (reserved_size - (@free * @ratio)) / reserved_size
+  end
+  def reserved_size
+    @device_size - @device_slack
   end
   def free_wasted_threshold
     return 1 if used_ratio < USED_RANGE_FOR_BALANCE.min
