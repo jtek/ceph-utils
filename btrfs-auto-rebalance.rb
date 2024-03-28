@@ -150,6 +150,14 @@ class Btrfs
     cancel_reached = false
     # Safeguard for long balances, will cancel a running balance if time expired
     fork_balance_cancel
+
+    # First pass with very low usage for fast processing of large allocation/deallocations
+    log "rebalance with usage: 1"
+    balance_usage(1)
+    refresh_usage
+    log("waste %.2f%%" % (free_wasted * 100))
+    reset_tried_targets
+
     successive_failures = 0
     count = 0
     usage_target = start_target
