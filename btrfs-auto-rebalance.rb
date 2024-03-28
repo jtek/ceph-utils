@@ -1,9 +1,25 @@
 #!/usr/bin/ruby -w
 
+# Target when rebalancing (not much less than free_wasted_threshold)
+TARGET_RATIO_FROM_THRESHOLD = 0.9
+
+MAX_FAILURES = 50
+MAX_REBALANCES = 100
+FLAPPING_LEVEL = 3
+# How fast can we move the -dusage/-musage targets
+MIN_TARGET_STEP = 2
+MAX_TARGET_STEP = 10
+STEP_VS_WASTE = 0.75
+# Maximum time allocated globally
+MAX_TIME = 14400 # 4 hours
+MAX_FS_TIME = 5400 # 90 minutes
+
+
 require 'optparse'
 
+# spread value: meant to run daily, by default don't overlap next day's run
 @options = { min_waste_target: 0.2, min_used_for_balance: 0.33, verbose: true,
-            only_analyze: false, spread: nil }
+            only_analyze: false, spread: 24 * 3600 - MAX_TIME }
 OptionParser.new do |opts|
   opts.banner = <<EOS
 Usage: btrfs-auto-rebalance.rb [options]
@@ -36,27 +52,6 @@ EOS
   end
 end.parse!
 
-# Maximum percentage of free space wasted (in allocation groups)
-# allow higher percentage when the filesystem fills up
-MAX_FREE_WASTED_RANGE = (@options[:min_waste_target]..1.0)
-# The actual target for wasted free space is dependant on the allocation
-# don't balance if below the range, scale objective according to allocation
-# at full allocation we allow 100% waste
-USED_RANGE_FOR_BALANCE = (@options[:min_used_for_balance]..1.0)
-# Target when rebalancing (not much less than free_wasted_threshold)
-TARGET_RATIO_FROM_THRESHOLD = 0.9
-
-MAX_FAILURES = 50
-MAX_REBALANCES = 100
-FLAPPING_LEVEL = 3
-# How fast can we move the -dusage/-musage targets
-MIN_TARGET_STEP = 2
-MAX_TARGET_STEP = 10
-STEP_VS_WASTE = 0.75
-# Maximum time allocated globally
-MAX_TIME = 14400 # 4 hours
-MAX_FS_TIME = 5400 # 90 minutes
-
 require 'open3'
 
 def log(msg)
@@ -82,17 +77,21 @@ end
 class Btrfs
   attr_reader :mountpoint
 
-  def initialize(mountpoint)
+  def initialize(mountpoint, options)
     @mountpoint = mountpoint
-    @tried_targets = {}
+    @options = options
+    reset_tried_targets
     @flapping_detected = false
     refresh_usage
   end
 
   def tried(target)
-    @tried_targets[target] ||= 0
     @tried_targets[target] += 1
     @flapping_detected = true if @tried_targets[target] == FLAPPING_LEVEL
+  end
+
+  def reset_tried_targets
+    @tried_targets = Hash.new { 0 }
   end
 
   def refresh_usage
@@ -191,6 +190,7 @@ class Btrfs
       log "#{free_target_wasted} not reached in #{MAX_REBALANCES} balance calls"
     end
   ensure
+    # If we finished before our allocated time we must kill the cancel process
     kill_balance_cancel unless cancel_reached
     log "%s: #{@mountpoint} rebalance stopped" %
         Time.now.strftime("%Y/%m/%d %H:%M:%S")
@@ -246,7 +246,7 @@ class Btrfs
   end
 
   def rebalance_needed?
-    USED_RANGE_FOR_BALANCE.include?(used_ratio) &&
+    (used_ratio > @options[:min_used_for_balance]) &&
       (free_wasted > free_wasted_threshold)
   end
 
@@ -260,13 +260,11 @@ class Btrfs
     @device_size - @device_slack
   end
   def free_wasted_threshold
-    return 1 if used_ratio < USED_RANGE_FOR_BALANCE.min
+    return 1 if used_ratio < @options[:min_used_for_balance]
 
-    position =
-      (used_ratio - USED_RANGE_FOR_BALANCE.min) /
-      (USED_RANGE_FOR_BALANCE.max - USED_RANGE_FOR_BALANCE.min)
-    MAX_FREE_WASTED_RANGE.min +
-      position * (MAX_FREE_WASTED_RANGE.max - MAX_FREE_WASTED_RANGE.min)
+    position = (used_ratio - @options[:min_used_for_balance]) /
+               (1 - @options[:min_used_for_balance])
+    @options[:min_waste_target] + position * (1 - @options[:min_waste_target])
   end
 
   def free_wasted_target
@@ -284,9 +282,7 @@ def change_title(msg)
 end
 
 def delay
-  # Meant to run daily, by default don't overlap next run on following day
-  spread = (@options[:spread] || (24 * 3600 - MAX_TIME)).to_i
-  sleep_amount = (spread * Random.rand).to_i
+  sleep_amount = (@options[:spread] * Random.rand).to_i
   return unless sleep_amount > 0
 
   log "delaying for #{sleep_amount}"
@@ -295,7 +291,8 @@ def delay
 end
 
 def rebalance_fs
-  todo = filesystems.map { |fs| Btrfs.new(fs) }.select(&:rebalance_needed?)
+  todo =
+    filesystems.map { |fs| Btrfs.new(fs, @options) }.select(&:rebalance_needed?)
   if todo.any?
     delay
     $start_time = Time.now
@@ -310,7 +307,7 @@ end
 
 def analyse_fs
   filesystems.map do |fs|
-    Btrfs.new(fs).log_current_state
+    Btrfs.new(fs, @options).log_current_state
   end
 end
 
