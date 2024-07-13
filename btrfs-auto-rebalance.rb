@@ -258,10 +258,10 @@ class Btrfs
     1 - (@unallocated.to_f / (@free * @ratio))
   end
   def used_ratio
-    (reserved_size - (@free * @ratio)) / reserved_size
+    (@device_size - (@free * @ratio)) / @device_size
   end
-  def reserved_size
-    @device_size - @device_slack
+  def total_device_size
+    @device_size + @device_slack
   end
   def free_wasted_threshold
     return 1 if used_ratio < @options[:min_used_for_balance]
