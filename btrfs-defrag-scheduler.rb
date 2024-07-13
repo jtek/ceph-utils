@@ -510,6 +510,27 @@ class AsyncSerializer
     @store_content.keys.each { |file| file_write(file) }
   end
 
+  def dump_state
+    puts "++ AsyncSerializer"
+    @store_content.each do |file, hash|
+      task = @store_tasks[file]
+      task_state = if task
+                     "first: %s, last: %s" %
+                       [ task[:first_write].to_s, task[:last_write].to_s ]
+                   else
+                     ""
+                   end
+      puts "++ #{file} #{task_state}"
+      hash.each do |key, sub_hash|
+        puts "++   - #{key}:"
+        puts "++     last_write: #{sub_hash[:last_write]}"
+        puts "++     data: #{sub_hash[:data].to_s[0..100]}"
+      end
+    end
+    puts "++ store tasks: #{@store_tasks.keys.join(',')}"
+    puts "++ queue size: #{@serialization_queue.size}"
+  end
+
   private
 
   def store_loop
@@ -686,8 +707,9 @@ class AsyncRunner
   def dump_timings
     @tasks.each_value do |params|
       # Interrupt handling: Outputs#info unavailable
-      puts("++ %s, %s: delayed %.2f, runtime %.3f" %
-           [ @name, params[:name], params[:delayed], params[:runtime] ])
+      puts("++ %s, %s: delayed %.2f, runtime %.3f, next in %ds" %
+           [ @name, params[:name], params[:delayed], params[:runtime],
+             params[:run_at] - Time.now ])
     end
   end
 
@@ -3077,8 +3099,10 @@ class Main
     exit
   end
 
-  def dump_timings
+  def dump_running_state
     @devs.dump_timings
+    AsyncSerializer.instance.dump_state
+    STDOUT.flush
   end
 
   def next_fatrace_restart_at
@@ -3089,7 +3113,7 @@ end
 @main = Main.new
 
 exit_interrupt_handler = proc { @main.flush_all_exit }
-timings_interrupt_handler = proc { @main.dump_timings }
+timings_interrupt_handler = proc { @main.dump_running_state }
 Signal.trap("INT", exit_interrupt_handler)
 Signal.trap("TERM", exit_interrupt_handler)
 Signal.trap("USR1", timings_interrupt_handler)
