@@ -6,10 +6,8 @@ TARGET_RATIO_FROM_THRESHOLD = 0.9
 MAX_FAILURES = 50
 MAX_REBALANCES = 100
 FLAPPING_LEVEL = 3
-# How fast can we move the -dusage/-musage targets
-MIN_TARGET_STEP = 2
-MAX_TARGET_STEP = 10
-STEP_VS_WASTE = 0.75
+# How fast can we increase the -dusage/-musage targets
+TARGET_INCREASE_STEP = 2
 # Maximum time allocated globally
 MAX_TIME = 14400 # 4 hours
 MAX_FS_TIME = 5400 # 90 minutes
@@ -152,10 +150,10 @@ class Btrfs
     fork_balance_cancel
 
     # First pass with very low usage for fast processing of large allocation/deallocations
-    log "rebalance with usage: 1"
-    balance_usage(1)
-    refresh_usage
-    log("waste %.2f%%" % (free_wasted * 100))
+    # log "rebalance with usage: 1"
+    # balance_usage(1)
+    # refresh_usage
+    # log("waste %.2f%%" % (free_wasted * 100))
     reset_tried_targets
 
     successive_failures = 0
@@ -184,12 +182,10 @@ class Btrfs
         usage_target -= 1
       else
         successive_failures = 0
-	step = [ [ ((free_wasted - free_wasted_target) * 100) * STEP_VS_WASTE,
-	            MIN_TARGET_STEP ].max,
-	         MAX_TARGET_STEP ].min.to_i
-        usage_target = [ usage_target + step, 100 ].min
+        usage_target = [ usage_target + TARGET_INCREASE_STEP, 100 ].min
       end
-      log("waste %.2f%%" % (free_wasted * 100))
+      log("%s: waste %.2f%%" % [ Time.now.strftime("%Y/%m/%d %H:%M:%S"),
+                                 free_wasted * 100 ])
       if @flapping_detected
         fail "flapping detected: #{FLAPPING_LEVEL} times at this usage level"
       end
@@ -281,7 +277,8 @@ class Btrfs
 
   # Try to guess best usage_target starting_point
   def start_target
-    ((1 - free_wasted_target) * 66).to_i
+    # ((1 - free_wasted_target) * 66).to_i
+    10
   end
 end
 
