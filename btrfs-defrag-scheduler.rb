@@ -2058,7 +2058,7 @@ class BtrfsDev
 
     # We create a dedicated AsyncRunner as these tasks are supposed to run
     # concurrently with other BtrfsDev's ones
-    @io_runner = AsyncRunner.new("#{dirname} IO")
+    @io_runner = AsyncRunner.new("'#{dirname}' IO runner")
     @io_runner.add_task(name: "defragmenter") do
       defrag!
       available_for_defrag_at
@@ -2632,7 +2632,7 @@ class BtrfsDev
     @rate_controller.wait_slow_scan_restart
   end
 
-  # Prune read-only subvolumes or blacklisted paths
+  # Prune read-only subvolumes and blacklisted paths
   def prune?(entry)
     in_ro_subvol?(entry) || blacklisted?(entry)
   end
