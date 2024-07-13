@@ -489,6 +489,7 @@ class AsyncSerializer
   end
 
   def serialize_entry(file, key, value)
+    info "= #{file}[#{key}] queued for serialization"
     @serialization_queue.push [ file, key, value, Time.now.to_f ]
   end
 
@@ -535,7 +536,9 @@ class AsyncSerializer
 
   def store_loop
     loop do
+      # Update @store_tasks and @store_content with the queue
       process_serialization_queue
+      # Look for writes not yet serialized
       files = @store_tasks.select do |file, tstamps|
         now = Time.now.to_f
         # If there's only one entry, no use waiting
@@ -544,20 +547,19 @@ class AsyncSerializer
           tstamps[:last_write] < (now - MIN_COMMIT_DELAY) ||
           tstamps[:first_write] < (now - MAX_COMMIT_DELAY)
       end.keys
-      files.each { |file| @store_tasks.delete(file) }
-      files.each { |file| file_write(file) }
+      files.each { |file| file_write(file); @store_tasks.delete(file) }
       delay_until_next_write_check
     end
   end
 
   def process_serialization_queue
     until @serialization_queue.empty?
-      file, key, value, now = @serialization_queue.pop
-      @store_content[file][key] = { last_write: now, data: value }
+      file, key, value, tstamp = @serialization_queue.pop
+      @store_content[file][key] = { last_write: tstamp, data: value }
       if @store_tasks[file]
-        @store_tasks[file][:last_write] = now
+        @store_tasks[file][:last_write] = tstamp
       else
-        @store_tasks[file] = { first_write: now, last_write: now }
+        @store_tasks[file] = { first_write: tstamp, last_write: tstamp }
       end
     end
   end
@@ -616,6 +618,7 @@ class AsyncSerializer
   end
 
   def file_write(file)
+    info "= #{file}: storing serializations"
     cleanup_old_keys(file)
     to_store = dump(file)
     FileUtils.mkdir_p(File.dirname(file))
@@ -2449,9 +2452,7 @@ class BtrfsDev
 
     def serialize_filecount_if_needed
       # If we don't have a filecount yet, no need to update
-      return unless @filecount
-
-      serialize_filecount if considered > @filecount
+      serialize_filecount if @filecount && (considered > @filecount)
     end
 
     # Adaptive wait: more frequently if we are raising an existing @filecount
