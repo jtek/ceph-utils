@@ -19,7 +19,7 @@ require 'optparse'
 
 # spread value: meant to run daily, by default don't overlap next day's run
 @options = { min_waste_target: 0.2, min_used_for_balance: 0.33, verbose: true,
-            only_analyze: false, spread: 24 * 3600 - MAX_TIME }
+             only_analyze: false, spread: 24 * 3600 - MAX_TIME }
 OptionParser.new do |opts|
   opts.banner = <<EOS
 Usage: btrfs-auto-rebalance.rb [options]
