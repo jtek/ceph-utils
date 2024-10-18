@@ -16,7 +16,8 @@ $defaults = {
   threshold: 1.05,
   speed_multiplier: 1.0,
   slow_start: 600,
-  drive_count: 1
+  drive_count: 1,
+  tree_speed: 100,
 }
 
 def help_exit
@@ -69,6 +70,11 @@ Recognized options:
     - increase this if the scheduler can't keep up and displays overflows
     default: #{$defaults[:speed_multiplier]}
 
+--max-tree-read-speed <value> (-r)
+    maximum directory read speed in file per second when computing filesystem
+    defragmentable entry count for the first time
+    default: #{$defaults[:tree_speed]}
+
 --slow-start <value> (-l)
     wait for <value> seconds before scanning the filesystems.
     The initial catch-up to find the point where the last scan aborted is IO
@@ -115,6 +121,7 @@ opts =
                    GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--defrag-chunk-size', '-k', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--speed-multiplier', '-m', GetoptLong::REQUIRED_ARGUMENT ],
+                 [ '--tree-read-speed', '-r', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--slow-start', '-l', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--drive-count', '-c', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--target-load', '-t', GetoptLong::REQUIRED_ARGUMENT ],
@@ -132,6 +139,7 @@ $extent_size = $defaults[:extent_size]
 $chunk_size = nil
 $btrfs_needs_quiet = false
 speed_multiplier = $defaults[:speed_multiplier]
+tree_read_speed = $defaults[:tree_speed]
 fragmentation_threshold = $defaults[:threshold]
 slow_start = $defaults[:slow_start]
 scan_time = nil
@@ -182,6 +190,9 @@ opts.each do |opt,arg|
     multiplier = arg.to_f
     next if multiplier <= 0
     speed_multiplier = multiplier
+  when '--tree-read-speed'
+    next if arg.to_f <= 0
+    tree_read_speed = arg.to_f
   when '--slow-start'
     slow_start = arg.to_i
     slow_start = 600 if slow_start < 0
@@ -262,6 +273,7 @@ STOPPED_WRITING_DELAY = 30
 # filefrag more than that
 MAX_WRITES_DELAY = 8 * 3600
 
+TREE_READ_SPEED = tree_read_speed
 # Full refresh of fragmentation information on files happens in
 # (pass number of hours on commandline if the default is not optimal for you)
 SLOW_SCAN_PERIOD = (scan_time || 4 * 7 * 24) * 3600 # 1 month
@@ -393,7 +405,7 @@ def Find.process_files(path, directory_prune_block)
           next if f == "." or f == ".."
 
           f = File.join(file, f)
-          ps.unshift f.untaint
+          ps.unshift f
         end
       else
         # Ignore non-files
@@ -401,7 +413,7 @@ def Find.process_files(path, directory_prune_block)
         # A file small enough to fit a node can't be fragmented
         next if stat.size <= 4096
 
-        yield file.dup.taint, stat
+        yield file.dup, stat
       end
     end
   end
@@ -544,8 +556,8 @@ class AsyncSerializer
         # If there's only one entry, no use waiting
         (@store_content[file].count == 1) ||
           # otherwise use delays to give a chance to others to join
-          tstamps[:last_write] < (now - MIN_COMMIT_DELAY) ||
-          tstamps[:first_write] < (now - MAX_COMMIT_DELAY)
+          (tstamps[:last_write] < (now - MIN_COMMIT_DELAY)) ||
+          (tstamps[:first_write] < (now - MAX_COMMIT_DELAY))
       end.keys
       files.each { |file| file_write(file); @store_tasks.delete(file) }
       delay_until_next_write_check
@@ -556,11 +568,8 @@ class AsyncSerializer
     until @serialization_queue.empty?
       file, key, value, tstamp = @serialization_queue.pop
       @store_content[file][key] = { last_write: tstamp, data: value }
-      if @store_tasks[file]
-        @store_tasks[file][:last_write] = tstamp
-      else
-        @store_tasks[file] = { first_write: tstamp, last_write: tstamp }
-      end
+      @store_tasks[file] ||= { first_write: tstamp }
+      @store_tasks[file][:last_write] = tstamp
     end
   end
 
@@ -2007,7 +2016,15 @@ class BtrfsDev
     # Pre-init these (used by slow_status and slow_files_state_update
     @already_processed = @recent = @queued = 0
     @slow_scan_thread = Thread.new do
-      info("## Beginning files list updater thread for #{dir}")
+      info "## Beginning files list updater thread for #{dir}"
+      if @rate_controller.need_filecount?
+        info "## filecount unknown, counting (max: #{TREE_READ_SPEED}/s)"
+        rate_limiter = MaxRateLimiter.new(TREE_READ_SPEED)
+        count = 0
+        @rate_controller.catchup_wait
+        Find.process_files(dir, prune_block) { rate_limiter.event; count += 1 }
+        @rate_controller.store_filecount(count)
+      end
       loop do
         slow_files_state_update
         defragment_extent_and_subvolume_trees if $defragment_trees
@@ -2295,11 +2312,15 @@ class BtrfsDev
       msgs << ("d:%.2f" % delay_speedup) if delay_speedup >= 1.01
       adjustment << msgs.join(',')
     end
-    "%d/%.3fs (%.3fs expected, IO %.0f%%) %s%s" %
-      [ @rate_controller.current_batch_size,
-        @rate_controller.current_batch_period, average_batch_time,
-        @checker.load * 100, @rate_controller.relative_scan_speed_description,
-        adjustment ]
+    if @rate_controller.need_filecount?
+      "counting at #{TREE_READ_SPEED}/s"
+    else
+      "%d/%.3fs (%.3fs expected, IO %.0f%%) %s%s" %
+        [ @rate_controller.current_batch_size,
+          @rate_controller.current_batch_period, average_batch_time,
+          @checker.load * 100, @rate_controller.relative_scan_speed_description,
+          adjustment ]
+    end
   end
 
   def register_filefrag_speed(count:, time:, cached:)
@@ -2379,6 +2400,36 @@ class BtrfsDev
     end
   end
 
+  # Implement an event handler blocking on a given rate
+  # (slowing down with load if load target is given)
+  class MaxRateLimiter
+    def initialize(event_per_sec)
+      @period = 1.0 / event_per_sec
+      @event_per_sec = @bucket = @max_bucket = event_per_sec.to_f
+      @last_event = Time.now
+    end
+
+    def event
+      now = Time.now
+      @bucket += current_rate * (now - @last_event)
+      @bucket = [ @bucket, @max_bucket ].min
+      if @bucket > 1
+        @bucket -= 1
+        @last_event = now
+      else
+        sleep @period
+        @bucket = 0
+        @last_event = Time.now
+      end
+    end
+
+    private
+
+    def current_rate
+      @event_per_sec / LoadCheck.instance.slowdown_ratio
+    end
+  end
+
   class FilesStateRateController
     attr_accessor :target_stop_time, :considered
     attr :current_batch_size, :current_batch_period
@@ -2401,8 +2452,10 @@ class BtrfsDev
     end
 
     def relative_scan_speed_description
-      if @filecount.nil? || @filecount == 0
-        "unknow"
+      if @filecount.nil?
+        "counting"
+      elsif @filecount == 0
+        "empty"
       elsif scan_time == 0
         "init"
       else
@@ -2430,19 +2483,22 @@ class BtrfsDev
     end
 
     def init_new_scan
+      catchup_wait
       @scan_start = Time.now
+      @target_stop_time = @scan_start + SLOW_SCAN_PERIOD
+      init_pass_speed
+      @last_slow_scan_batch_start = @scan_start
+    end
+
+    def catchup_wait
       if @pass == :first
         # Avoid IO load just after boot (see "--slow-start" option)
         if SLOW_SCAN_CATCHUP_WAIT > 0
           info("= #{@dev.dirname}: waiting #{SLOW_SCAN_CATCHUP_WAIT}s")
-          @scan_start += SLOW_SCAN_CATCHUP_WAIT
+          sleep SLOW_SCAN_CATCHUP_WAIT
         end
         @pass = :non_first
       end
-      @target_stop_time = @scan_start + SLOW_SCAN_PERIOD
-      init_pass_speed
-      delay_until @scan_start
-      @last_slow_scan_batch_start = Time.now
     end
 
     def wait_next_slow_scan_pass
@@ -2489,6 +2545,15 @@ class BtrfsDev
       # Interrupt handling: Outputs#info unavailable
       puts "= #{@dev.dirname}; flushing file count progress"
       serialize_filecount_if_needed
+    end
+
+    def need_filecount?
+      @filecount.nil?
+    end
+
+    def store_filecount(count)
+      self.considered = count
+      update_filecount_on_scan_end
     end
 
     private
@@ -2600,11 +2665,6 @@ class BtrfsDev
                queue_slow_scan_batch(list)
              end
     begin
-      prune_block = Proc.new do |path|
-        next false unless prune?(path)
-        verbose(" = Ignoring path #{dir}: #{path}")
-        true
-      end
       Find.process_files(dir, prune_block) do |path, stat|
         short_name = short_filename(path)
 
@@ -2635,6 +2695,14 @@ class BtrfsDev
   # Prune read-only subvolumes and blacklisted paths
   def prune?(entry)
     in_ro_subvol?(entry) || blacklisted?(entry)
+  end
+
+  def prune_block
+    Proc.new do |path|
+      next false unless prune?(path)
+      verbose(" = Ignoring path #{dir}: #{path}")
+      true
+    end
   end
 
   def skip_defrag?(filename)
