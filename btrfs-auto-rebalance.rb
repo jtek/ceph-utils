@@ -1,13 +1,16 @@
 #!/usr/bin/ruby -w
 
 # Target when rebalancing (not much less than free_wasted_threshold)
-TARGET_RATIO_FROM_THRESHOLD = 0.9
+TARGET_RATIO_FROM_THRESHOLD = 0.95
+# THreshold for beginning raising the targets
+USED_RATIO_FOR_MIN_TARGET = 0.5
 
 MAX_FAILURES = 50
 MAX_REBALANCES = 100
 FLAPPING_LEVEL = 3
 # How fast can we increase the -dusage/-musage targets
-TARGET_INCREASE_STEP = 2
+TARGET_INCREASE_STEP = 4
+
 # Maximum time allocated globally
 MAX_TIME = 14400 # 4 hours
 MAX_FS_TIME = 5400 # 90 minutes
@@ -16,9 +19,10 @@ MAX_FS_TIME = 5400 # 90 minutes
 require 'optparse'
 
 # spread value: meant to run daily, by default don't overlap next day's run
-@options = { min_waste_target: 0.2, min_used_for_balance: 0.33, verbose: true,
+# waste target is adapted according to space used (less space: lower target)
+@options = { min_waste_target: 0.35, max_waste_target: 0.5, verbose: true,
              only_analyze: false, spread: 24 * 3600 - MAX_TIME }
-OptionParser.new do |opts|
+parser = OptionParser.new do |opts|
   opts.banner = <<EOS
 Usage: btrfs-auto-rebalance.rb [options]
 \twill balance filesytems until wasted allocation space (allocated
@@ -28,17 +32,16 @@ EOS
   opts.on("-v", "--[no-]verbose", "Run verbosely", TrueClass) do |v|
     @options[:verbose] = v
   end
-  opts.on("-u", "--min-used-for-balance MIN_SPACE_USED",
-          "process only if allocated space ratio is above ([0.0 .. 1.0], " \
-          "default: #{@options[:min_used_for_balance]})",
-          Float) do |v|
-    @options[:min_used_for_balance] = v
-  end
-  opts.on("-t", "--min-waste-target WASTE_TARGET",
-          "wasted space target (rises when filesystem fills up above " \
-          "--min-used-for-balance value, [0.0 .. 1.0], default: " \
+  opts.on("-t", "--min-waste-target WASTE_TARGET_ON_EMPTY",
+          "used in combination with --max-waste-target, see below, default: " \
           "#{@options[:min_waste_target]})", Float) do |v|
     @options[:min_waste_target] = v
+  end
+  opts.on("-T", "--max-waste-target WASTE_TARGET_ON_FULL",
+          "actual target progresses linearly between min and max when " \
+          "used_ratio rises between #{USED_RATIO_FOR_MIN_TARGET} and 100%, " \
+          "default: #{@options[:max_waste_target]})", Float) do |v|
+    @options[:max_waste_target] = v
   end
   opts.on("-a", "--analyze-only",
           "Only compute waste spaces and display targets", TrueClass) do |v|
@@ -48,7 +51,15 @@ EOS
           Integer) do |v|
     @options[:spread] = v
   end
-end.parse!
+end
+parser.parse!
+
+if @options[:max_waste_target] < @options[:min_waste_target]
+  puts parser.help
+  puts
+  puts "Error: max-waste-target < min-waste-target"
+  exit 1
+end
 
 require 'open3'
 
@@ -250,8 +261,7 @@ class Btrfs
   end
 
   def rebalance_needed?
-    (used_ratio > @options[:min_used_for_balance]) &&
-      (free_wasted > free_wasted_threshold)
+    (free_wasted > free_wasted_threshold)
   end
 
   def free_wasted
@@ -264,18 +274,19 @@ class Btrfs
     @device_size + @device_slack
   end
   def free_wasted_threshold
-    return 1 if used_ratio < @options[:min_used_for_balance]
+    return @options[:min_waste_target] if used_ratio < USED_RATIO_FOR_MIN_TARGET
 
-    position = (used_ratio - @options[:min_used_for_balance]) /
-               (1 - @options[:min_used_for_balance])
-    @options[:min_waste_target] + position * (1 - @options[:min_waste_target])
+    position = (used_ratio - USED_RATIO_FOR_MIN_TARGET) /
+               (1 - USED_RATIO_FOR_MIN_TARGET)
+    @options[:min_waste_target] +
+      position * (@options[:max_waste_target] - @options[:min_waste_target])
   end
 
   def free_wasted_target
     free_wasted_threshold * TARGET_RATIO_FROM_THRESHOLD
   end
 
-  # Try to guess best usage_target starting_point
+  # Try to guess best usage_target starting_point ?
   def start_target
     # ((1 - free_wasted_target) * 66).to_i
     10
