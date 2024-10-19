@@ -2403,22 +2403,30 @@ class BtrfsDev
   # Implement an event handler blocking on a given rate
   # (slowing down with load if load target is given)
   class MaxRateLimiter
-    def initialize(event_per_sec)
+    # Avoid too much context switching between FS specific threads by processing
+    # the tree walk in bursts
+    BURST_MS = 500
+
+    def initialize(event_per_sec, burst_ms: BURST_MS)
       @period = 1.0 / event_per_sec
+      @burst_period = burst_ms / 1000.0
+      @burst_count = @burst_period * event_per_sec
       @event_per_sec = @bucket = @max_bucket = event_per_sec.to_f
       @last_event = Time.now
     end
 
     def event
       now = Time.now
-      @bucket += current_rate * (now - @last_event)
+      delay_since_last_event = (now - @last_event)
+      @bucket += current_rate * delay_since_last_event
       @bucket = [ @bucket, @max_bucket ].min
       if @bucket > 1
         @bucket -= 1
         @last_event = now
       else
-        sleep @period
-        @bucket = 0
+        # Fill the bucket with burst count and wait accordingly
+        sleep @burst_period - (@bucket / @event_per_sec)
+        @bucket = @burst_count - 1
         @last_event = Time.now
       end
     end
