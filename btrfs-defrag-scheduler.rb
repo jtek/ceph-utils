@@ -18,6 +18,7 @@ $defaults = {
   slow_start: 600,
   drive_count: 1,
   tree_speed: 100,
+  fatrace: true,
 }
 
 def help_exit
@@ -29,6 +30,9 @@ Recognized options:
 
 --help (-h)
     This message
+
+--no-fatrace
+    Disable fatrace file write event tracking
 
 --full-scan-time <value> (-s)
     Number of hours over which to scan the filesystem (>= 0.05)
@@ -70,7 +74,7 @@ Recognized options:
     - increase this if the scheduler can't keep up and displays overflows
     default: #{$defaults[:speed_multiplier]}
 
---max-tree-read-speed <value> (-r)
+--tree-read-speed <value> (-r)
     maximum directory read speed in file per second when computing filesystem
     defragmentable entry count for the first time
     default: #{$defaults[:tree_speed]}
@@ -113,6 +117,7 @@ opts =
   GetoptLong.new([ '--help', '-h', '-?', GetoptLong::NO_ARGUMENT ],
                  [ '--verbose', '-v', GetoptLong::NO_ARGUMENT ],
                  [ '--debug', '-d', GetoptLong::NO_ARGUMENT ],
+                 [ '--no-fatrace', GetoptLong::NO_ARGUMENT ],
                  [ '--ignore-load', '-i', GetoptLong::NO_ARGUMENT ],
                  [ '--full-scan-time', '-s', GetoptLong::REQUIRED_ARGUMENT ],
                  [ '--threshold', '-w', GetoptLong::REQUIRED_ARGUMENT ],
@@ -143,6 +148,7 @@ tree_read_speed = $defaults[:tree_speed]
 fragmentation_threshold = $defaults[:threshold]
 slow_start = $defaults[:slow_start]
 scan_time = nil
+$run_fatrace = true
 
 def convert_size(size)
   size = size.upcase
@@ -173,6 +179,8 @@ opts.each do |opt,arg|
   when '--debug'
     $debug = true
     $verbose = true
+  when '--no-fatrace'
+    $run_fatrace = false
   when '--full-scan-time'
     scan_time = arg.to_f
     help_exit if scan_time < 0.05
@@ -2133,8 +2141,9 @@ class BtrfsDev
         @perf_queue.pop
         skipped += 1
       end
-      info("** %s: perf queue overflow, skipping %d" %
-           [ @dirname, skipped ]) if skipped > 0
+      next unless skipped > 0
+
+      info("** %s: perf queue overflow, skipping %d" % [ @dirname, skipped ])
     end
   end
 
@@ -3164,7 +3173,11 @@ class Main
       end
       next_fatrace_restart_at
     end
-    @devs.fatrace_file_writes
+    if $run_fatrace
+      @devs.fatrace_file_writes
+    else
+      Thread.stop
+    end
   end
 
   def flush_all_exit
