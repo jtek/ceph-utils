@@ -21,7 +21,8 @@ require 'optparse'
 # spread value: meant to run daily, by default don't overlap next day's run
 # waste target is adapted according to space used (less space: lower target)
 @options = { min_waste_target: 0.35, max_waste_target: 0.5, verbose: true,
-             only_analyze: false, spread: 24 * 3600 - MAX_TIME }
+             only_analyze: false, spread: 24 * 3600 - MAX_TIME,
+             stop_condition: '/bin/false' }
 parser = OptionParser.new do |opts|
   opts.banner = <<EOS
 Usage: btrfs-auto-rebalance.rb [options]
@@ -50,6 +51,10 @@ EOS
   opts.on("-s", "--spread SECONDS", "Sleep randomly up to this amount",
           Integer) do |v|
     @options[:spread] = v
+  end
+  opts.on("-x", "--stop-condition CONDITION_CMD",
+          "command which exit code determines if balance must stop", String) do |v|
+    @options[:stop_condition] = v
   end
 end
 parser.parse!
@@ -80,7 +85,7 @@ def filesystems
       end
     end
   end
-  return mounts.map { |m| m[1] }
+  mounts.map { |m| m[1] }
 end
 
 class Btrfs
@@ -156,28 +161,16 @@ class Btrfs
 
   def rebalance
     @fs_start_time = Time.now
-    cancel_reached = false
+    @working = true
     # Safeguard for long balances, will cancel a running balance if time expired
-    fork_balance_cancel
-
-    # First pass with very low usage for fast processing of large allocation/deallocations
-    # log "rebalance with usage: 1"
-    # balance_usage(1)
-    # refresh_usage
-    # log("waste %.2f%%" % (free_wasted * 100))
+    setup_balance_cancel
     reset_tried_targets
 
     successive_failures = 0
     count = 0
     usage_target = start_target
-    while (free_wasted > free_wasted_target) && (count < MAX_REBALANCES)
-      if Time.now >= must_stop_at
-        log "Time allocated spent, aborting"
-	Process.wait @balance_cancel_pid
-	log "aborted"
-	cancel_reached = true
-        return
-      end
+    while (free_wasted > free_wasted_target) && (count < MAX_REBALANCES) &&
+          (Time.now < must_stop_at)
       log "rebalance with usage: #{usage_target}"
       count += 1
       status = balance_usage(usage_target)
@@ -200,15 +193,18 @@ class Btrfs
       if @flapping_detected
         fail "flapping detected: #{FLAPPING_LEVEL} times at this usage level"
       end
+      next unless stop_condition
+
+      fail "stop condition (#{@options[:stop_condition]}) reached"
     end
     if free_wasted > free_wasted_target
       log "#{free_target_wasted} not reached in #{MAX_REBALANCES} balance calls"
     end
   ensure
     # If we finished before our allocated time we must kill the cancel process
-    kill_balance_cancel unless cancel_reached
     log "%s: #{@mountpoint} rebalance stopped" %
         Time.now.strftime("%Y/%m/%d %H:%M:%S")
+    @working = false
   end
 
   def must_stop_at
@@ -221,30 +217,32 @@ class Btrfs
     end
   end
 
-  def fork_balance_cancel
-    # sleep a minimum of 10 seconds to let the balance process begin
-    delay = [ (must_stop_at - Time.now).to_i, 10 ].max + 1
-    silent_balance_cmd = "btrfs balance cancel #{@mountpoint} &>/dev/null"
-    @balance_cancel_pid = spawn("sleep #{delay} && #{silent_balance_cmd}")
+  def setup_balance_cancel
+    Thread.new do
+      until (Time.now >= must_stop_at) || stop_condition || !working?
+        sleep(30)
+      end
+      system("btrfs balance cancel #{@mountpoint} &>/dev/null") if working?
+    end
   end
 
-  def kill_balance_cancel
-    Process.kill "TERM", @balance_cancel_pid
-  rescue
-    # do nothing
-  ensure
-    # Cleanup
-    Process.wait @balance_cancel_pid
+  def stop_condition
+    system(@options[:stop_condition])
+  end
+
+  def working?
+    @working
   end
 
   def balance_usage(target)
     tried(target)
     return balance_zero if target == 0
-    cmd =
-      "nice btrfs balance start -dusage=#{target} -musage=#{target} #{@mountpoint}"
+
+    cmd = "nice btrfs balance start -dusage=%d -musage=%d %s" %
+          [ target, target, mountpoint ]
     output, status = Open3.capture2e(cmd)
     log output
-    return status.exitstatus
+    status.exitstatus
   end
 
   def balance_zero
@@ -252,12 +250,13 @@ class Btrfs
       "nice btrfs balance start -musage=0 #{@mountpoint}"
     output, status = Open3.capture2e(cmd)
     log output
-    return status.exitstatus if Time.now > must_stop_at
+    return status.exitstatus if (Time.now > must_stop_at) || stop_condition
+
     cmd =
       "nice btrfs balance start -dusage=0 #{@mountpoint}"
     output, status2 = Open3.capture2e(cmd)
     log output
-    return [ status.exitstatus, status2.exitstatus ].max
+    [ status.exitstatus, status2.exitstatus ].max
   end
 
   def rebalance_needed?
@@ -315,7 +314,7 @@ def rebalance_fs
     # don't use the same order on each run (one filesystem could take too long
     # and block others)
     todo.shuffle.each do |btrfs|
-      change_title("balancing #{btrfs.mountpoint} until #{Btrfs.must_stop_at}")
+      change_title("balancing #{btrfs.mountpoint} until #{btrfs.must_stop_at}")
       btrfs.rebalance_if_needed
     end
   end
