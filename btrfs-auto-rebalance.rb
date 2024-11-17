@@ -96,6 +96,7 @@ class Btrfs
     @options = options
     reset_tried_targets
     @flapping_detected = false
+    @fs_start_time = nil
     refresh_usage
   end
 
@@ -208,7 +209,7 @@ class Btrfs
   end
 
   def must_stop_at
-    self.class.must_stop_at(@fs_start_time)
+    self.class.must_stop_at(@fs_start_time || Time.now)
   end
 
   class << self
