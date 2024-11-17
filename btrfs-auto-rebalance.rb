@@ -198,7 +198,7 @@ class Btrfs
       fail "stop condition (#{@options[:stop_condition]}) reached"
     end
     if free_wasted > free_wasted_target
-      log "#{free_target_wasted} not reached in #{MAX_REBALANCES} balance calls"
+      log "#{free_wasted_target} not reached in #{MAX_REBALANCES} balance calls"
     end
   ensure
     # If we finished before our allocated time we must kill the cancel process
