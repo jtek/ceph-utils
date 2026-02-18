@@ -20,7 +20,7 @@ require 'optparse'
 
 # spread value: meant to run daily, by default don't overlap next day's run
 # waste target is adapted according to space used (less space: lower target)
-@options = { min_waste_target: 0.35, max_waste_target: 0.5, verbose: true,
+@options = { min_waste_target: 0.35, max_waste_target: 0.55, verbose: true,
              only_analyze: false, spread: 24 * 3600 - MAX_TIME,
              stop_condition: '/bin/false' }
 parser = OptionParser.new do |opts|
@@ -199,7 +199,7 @@ class Btrfs
       fail "stop condition (#{@options[:stop_condition]}) reached"
     end
     if free_wasted > free_wasted_target
-      log "#{free_wasted_target} not reached in #{MAX_REBALANCES} balance calls"
+      log "/!\ waste %.3f > target (%.3f)" % [ free_wasted, free_wasted_target]
     end
   ensure
     # If we finished before our allocated time we must kill the cancel process
@@ -276,8 +276,8 @@ class Btrfs
   def free_wasted_threshold
     return @options[:min_waste_target] if used_ratio < USED_RATIO_FOR_MIN_TARGET
 
-    position = (used_ratio - USED_RATIO_FOR_MIN_TARGET) /
-               (1 - USED_RATIO_FOR_MIN_TARGET)
+    position =
+      (used_ratio - USED_RATIO_FOR_MIN_TARGET) / (1 - USED_RATIO_FOR_MIN_TARGET)
     @options[:min_waste_target] +
       position * (@options[:max_waste_target] - @options[:min_waste_target])
   end
